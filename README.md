@@ -74,6 +74,45 @@ See the full API notes in the `docs/` directory.
 - Build static site: `mkdocs build` (output in `site/`)
 - Publish to GitHub Pages: `mkdocs gh-deploy` (requires repository remote configuration)
 
+## Publishing to GitHub
+
+### Initial Setup
+
+1. **Create a new repository on GitHub** (do not initialize with README, .gitignore, or license)
+
+2. **Push the main branch:**
+   ```bash
+   git remote add origin https://github.com/<your-username>/<repo-name>.git
+   git branch -M main
+   git push -u origin main
+   ```
+
+3. **Deploy documentation to GitHub Pages:**
+   ```bash
+   # Make sure mkdocs and mkdocs-material are installed
+   pip install mkdocs mkdocs-material
+   
+   # Deploy to gh-pages branch (creates it automatically)
+   mkdocs gh-deploy
+   # Or use the provided script:
+   chmod +x deploy_docs.sh
+   ./deploy_docs.sh
+   ```
+
+4. **Enable GitHub Pages:**
+   - Go to your repository Settings → Pages
+   - Under "Source", select the `gh-pages` branch
+   - Your documentation will be available at `https://<your-username>.github.io/<repo-name>/`
+
+### Updating Documentation
+
+Whenever you update the docs, simply run:
+```bash
+mkdocs gh-deploy
+```
+
+This will automatically update the `gh-pages` branch with the latest documentation.
+
 ## Project Layout
 
 - `brillouin_analyzer_src/brillouin_parser.py`: Data loading/parsing for Brillouin and Raman sets.
