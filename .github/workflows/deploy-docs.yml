@@ -1,0 +1,61 @@
+name: Deploy Documentation
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - '.github/workflows/deploy-docs.yml'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for git diff
+
+      - name: Check if mkdocs.yml exists
+        id: check_mkdocs
+        run: |
+          if [ -f "mkdocs.yml" ]; then
+            echo "mkdocs=true" >> $GITHUB_OUTPUT
+            echo "MkDocs configuration found."
+          else
+            echo "mkdocs=false" >> $GITHUB_OUTPUT
+            echo "No mkdocs.yml found. Skipping deployment."
+          fi
+
+      - name: Set up Python
+        if: steps.check_mkdocs.outputs.mkdocs == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install mkdocs and dependencies
+        if: steps.check_mkdocs.outputs.mkdocs == 'true'
+        run: |
+          pip install --upgrade pip
+          pip install mkdocs
+          # Try to install common mkdocs themes and plugins
+          pip install mkdocs-material || echo "Material theme not needed"
+          pip install mkdocs-windmill || echo "Windmill theme not available via pip, will try with default or installed theme"
+
+      - name: Build documentation
+        if: steps.check_mkdocs.outputs.mkdocs == 'true'
+        run: |
+          mkdocs build --verbose
+
+      - name: Deploy to GitHub Pages
+        if: steps.check_mkdocs.outputs.mkdocs == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdocs gh-deploy --force --message "Deploy documentation from commit ${{ github.sha }}"
+

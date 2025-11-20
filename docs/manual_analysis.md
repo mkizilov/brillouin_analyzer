@@ -100,7 +100,9 @@ Runs the same analysis across a z-slice or the full volume.
 Example:
 
 ```python
-from brillouin_analyzer_src.brillouin_spectra_analyzer_manual import analyze_brillouin_spectra_manual
+from brillouin_analyzer_src import *
+%load_ext autoreload
+%autoreload 2
 
 peaks_maps = analyze_brillouin_spectra_manual(
     data,

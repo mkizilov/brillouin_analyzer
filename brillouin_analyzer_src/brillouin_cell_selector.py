@@ -13,27 +13,27 @@ from .data_registry import extract_lateral_step_from_container
 def detect_cells(  
     peaks_map,
     title = 'Plot',
-    filter_type=None,
-    filter_params=None,
+    filter_type='median',
+    filter_params={'size': 3},
     interpolate_nan=False,
-    aggregation='robust',
+    aggregation='median',
     normalize=True,
-    pre_gaussian_blur=False,
-    morph_op=False,
-    annotate=False,
-    save_fig=False,
+    pre_gaussian_blur=True,
+    morph_op=True,
+    annotate=True,
+    save_fig=True,
     fig_path=None,
     save_csv=None,
-    cell_area=[0, 200],  # [min_area, max_area]
+    cell_area=[0, 1000],  # [min_area, max_area]
     threshold_method='otsu',  # 'otsu', 'adaptive', 'fixed', or 'manual'
     threshold_value=None,      # Threshold value if using 'fixed'
     manual_regions=None,       # List of regions: {'type':'polygon','points':[...] } or {'type':'circle','center':(x,y),'radius':r}
     contour_retrieval_mode=cv2.RETR_EXTERNAL,  # Contour retrieval mode
-    contour_smoothing=0,  # Approximation factor for contour smoothing
+    contour_smoothing=0.001,  # Approximation factor for contour smoothing
     prominence=0.1,
-    shift_range=None,
-    fwhm_range=None,
-    scaling_factor=1,
+    shift_range=('auto', 60, 99),
+    fwhm_range=('auto', 60, 99),
+    scaling_factor='auto',
     mark_all=False,
     pixel_aggregation='mean'   # New parameter for per-pixel aggregation
 ):
