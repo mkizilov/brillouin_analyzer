@@ -3,7 +3,7 @@ site_description: Tools for parsing, analyzing, plotting, and segmenting Brillou
 site_dir: site
 
 theme:
-  name: windmill
+  name: material
 
 plugins:
   - search
