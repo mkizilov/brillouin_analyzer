@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  
+  
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    
+    
+    
+    <link rel="shortcut icon" href="../img/favicon.ico">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0" />
+    <title>Plotting - Brillouin Analyzer</title>
+    <link href="../css/bootstrap-3.3.7.min.css" rel="stylesheet">
+    <link href="../css/font-awesome-4.7.0.css" rel="stylesheet">
+    <link href="../css/base.css" rel="stylesheet">
+    <link rel="stylesheet" href="../css/highlight.css">
+    <!-- HTML5 shim and Respond.js IE8 support of HTML5 elements and media queries -->
+    <!--[if lt IE 9]>
+        <script src="https://oss.maxcdn.com/libs/html5shiv/3.7.0/html5shiv.js"></script>
+        <script src="https://oss.maxcdn.com/libs/respond.js/1.3.0/respond.min.js"></script>
+    <![endif]-->
+
+    <script src="../js/jquery-3.2.1.min.js"></script>
+    <script src="../js/bootstrap-3.3.7.min.js"></script>
+    <script src="../js/highlight.pack.js"></script>
+    
+    <base target="_top">
+    <script>
+      var base_url = '..';
+      var is_top_frame = false;
+        
+        var pageToc = [
+          {title: "Plotting Module", url: "#_top", children: [
+              {title: "Spectra preview: plot_raw_spectrum", url: "#spectra-preview-plot_raw_spectrum" },
+              {title: "Spatial heatmaps: plot_brillouin_heatmap", url: "#spatial-heatmaps-plot_brillouin_heatmap" },
+              {title: "Cell-level statistics", url: "#cell-level-statistics" },
+          ]},
+        ];
+
+    </script>
+    <script src="../js/base.js"></script> 
+</head>
+
+<body>
+<script>
+if (is_top_frame) { $('body').addClass('wm-top-page'); }
+</script>
+
+
+
+<div class="container-fluid wm-page-content">
+  <a name="_top"></a>
+    
+
+    
+    
+      
+    
+
+  <div class="row wm-article-nav-buttons" role="navigation" aria-label="navigation">
+    
+    <div class="wm-article-nav pull-right">
+      <a href="../cell_selection/" class="btn btn-xs btn-default pull-right">
+        Next
+        <i class="fa fa-chevron-right" aria-hidden="true"></i>
+      </a>
+      <a href="../cell_selection/" class="btn btn-xs btn-link">
+        Cell Selection
+      </a>
+    </div>
+    
+    <div class="wm-article-nav">
+      <a href="../manual_analysis/" class="btn btn-xs btn-default pull-left">
+        <i class="fa fa-chevron-left" aria-hidden="true"></i>
+        Previous</a><a href="../manual_analysis/" class="btn btn-xs btn-link">
+        Manual Analysis
+      </a>
+    </div>
+    
+  </div>
+
+    
+
+    <h1 id="plotting-module">Plotting Module<a class="headerlink" href="#plotting-module" title="Permanent link">&para;</a></h1>
+<p>The <code>brillouin_plotter</code> utilities turn parsed/analysed data into figures for validation and publication. They accept the outputs of <code>parse_brillouin_set</code>, <code>analyze_brillouin_spectrum_manual</code>, and <code>analyze_brillouin_spectra_manual</code>, plus the cell masks produced by <code>detect_cells</code>.</p>
+<h2 id="spectra-preview-plot_raw_spectrum">Spectra preview: <code>plot_raw_spectrum</code><a class="headerlink" href="#spectra-preview-plot_raw_spectrum" title="Permanent link">&para;</a></h2>
+<p>Plots a single raw spectrum and marks peaks found by <code>scipy.signal.find_peaks</code>.
+- <code>spectrum_range</code> trims the waveform before plotting; negative values are clamped to zero automatically.
+- <code>height</code>, <code>distance</code>, and <code>prominence</code> are passed to <code>find_peaks</code>.
+- <code>mark_ranges</code> shades useful index ranges (for example, candidate laser windows).</p>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">brillouin_analyzer_src.brillouin_plotter</span><span class="w"> </span><span class="kn">import</span> <span class="n">plot_raw_spectrum</span>
+<span class="n">plot_raw_spectrum</span><span class="p">(</span><span class="n">spectra</span><span class="p">,</span> <span class="n">x_coord</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span> <span class="n">y_coord</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span> <span class="n">z_coord</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">mark_ranges</span><span class="o">=</span><span class="p">[(</span><span class="mi">200</span><span class="p">,</span> <span class="mi">260</span><span class="p">)])</span>
+</code></pre></div>
+
+<h2 id="spatial-heatmaps-plot_brillouin_heatmap">Spatial heatmaps: <code>plot_brillouin_heatmap</code><a class="headerlink" href="#spatial-heatmaps-plot_brillouin_heatmap" title="Permanent link">&para;</a></h2>
+<p>Builds a heatmap from a peaks map (or a list of maps) returned by the manual analyzer.
+- Pick the value to plot with <code>data_type</code> (<code>Shift</code> or <code>FWHM</code>) and <code>peak_type</code> (<code>Brillouin</code>, <code>Brillouin Left</code>, <code>Brillouin Right</code>, <code>Laser</code>, etc.). <code>match_type='contains'</code> broadens label matching.
+- Aggregation: <code>aggregation</code> applies inside each pixel (median/mean/robust); <code>pixel_aggregation</code> combines multiple maps (mean/median).
+- Cleaning: <code>interpolate_nan</code>, optional filters (<code>median</code>, <code>gaussian</code>, <code>bilateral</code>, <code>wiener</code>, <code>anisotropic_diffusion</code>, <code>total_variation</code>, <code>non_local_means</code>), and <code>colorbar_range</code> control visibility.
+- Axes: set <code>scale='auto'</code> to reuse the lateral step stored in the peaks map or pass a numeric scale. <code>matrix_save_path</code> writes the plotted matrix to a tab-separated file.</p>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">brillouin_analyzer_src.brillouin_plotter</span><span class="w"> </span><span class="kn">import</span> <span class="n">plot_brillouin_heatmap</span>
+<span class="n">plot_brillouin_heatmap</span><span class="p">(</span>
+    <span class="n">peaks_map</span><span class="o">=</span><span class="n">peaks_maps</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span>
+    <span class="n">title</span><span class="o">=</span><span class="s2">&quot;Median Brillouin shift&quot;</span><span class="p">,</span>
+    <span class="n">data_type</span><span class="o">=</span><span class="s2">&quot;Shift&quot;</span><span class="p">,</span>
+    <span class="n">peak_type</span><span class="o">=</span><span class="s2">&quot;Brillouin&quot;</span><span class="p">,</span>
+    <span class="n">pixel_aggregation</span><span class="o">=</span><span class="s2">&quot;median&quot;</span><span class="p">,</span>
+    <span class="n">colorbar_range</span><span class="o">=</span><span class="s2">&quot;auto&quot;</span><span class="p">,</span>
+    <span class="n">scale</span><span class="o">=</span><span class="s2">&quot;auto&quot;</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<h2 id="cell-level-statistics">Cell-level statistics<a class="headerlink" href="#cell-level-statistics" title="Permanent link">&para;</a></h2>
+<p>Use the outputs of <code>detect_cells</code> (cell shift/FWHM maps plus background) to summarize samples.</p>
+<h3 id="boxviolinerror-plots-plot_cell_boxplot">Box/violin/error plots: <code>plot_cell_boxplot</code><a class="headerlink" href="#boxviolinerror-plots-plot_cell_boxplot" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Inputs: <code>samples_data_list</code> is a list where each element is the 4-tuple returned by <code>detect_cells</code> (shift maps, FWHM maps, background shift, background FWHM). Pass multiple samples to compare cohorts.</li>
+<li>Pick metric with <code>data_type</code> (<code>shift</code>/<code>fwhm</code>) and <code>shift_type</code> (<code>stokes</code>, <code>anti-stokes</code>, <code>all</code>).</li>
+<li>Presentation controls: <code>plot_type</code> (<code>box</code>, <code>violin</code>, <code>errorbar</code>, or <code>scatter</code>), <code>aggregate_per_cell</code> (<code>pixel</code>, <code>cell</code>, or <code>both</code>), <code>show_data_points</code>, and <code>plot_background</code>.</li>
+<li>Statistics: enable <code>plot_p_values</code> with <code>comparisons=[(0,1), ...]</code>, choose <code>test_type</code> (<code>mannwhitney</code>, <code>ttest</code>, or <code>both</code>), and format with <code>p_value_format</code> (<code>numeric</code> or <code>stars</code>).</li>
+</ul>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">brillouin_analyzer_src.brillouin_plotter</span><span class="w"> </span><span class="kn">import</span> <span class="n">plot_cell_boxplot</span>
+<span class="n">plot_cell_boxplot</span><span class="p">(</span>
+    <span class="n">samples_data_list</span><span class="o">=</span><span class="p">[</span><span class="n">cells_treated</span><span class="p">,</span> <span class="n">cells_control</span><span class="p">],</span>
+    <span class="n">labels</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;Treated&quot;</span><span class="p">,</span> <span class="s2">&quot;Control&quot;</span><span class="p">],</span>
+    <span class="n">data_type</span><span class="o">=</span><span class="s2">&quot;shift&quot;</span><span class="p">,</span>
+    <span class="n">shift_type</span><span class="o">=</span><span class="s2">&quot;all&quot;</span><span class="p">,</span>
+    <span class="n">plot_type</span><span class="o">=</span><span class="s2">&quot;box&quot;</span><span class="p">,</span>
+    <span class="n">plot_p_values</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="n">comparisons</span><span class="o">=</span><span class="p">[(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">)]</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<h3 id="histograms-plot_cell_histogram">Histograms: <code>plot_cell_histogram</code><a class="headerlink" href="#histograms-plot_cell_histogram" title="Permanent link">&para;</a></h3>
+<p>Creates a histogram of per-cell or background values, fits a Gaussian, and can export the underlying arrays.
+- <code>data_list</code> accepts the same 4-tuples from <code>detect_cells</code>; set <code>cell_or_background</code> accordingly.
+- Limit with <code>cell_numbers</code>, clip with <code>value_range</code>, and choose <code>data_type</code>/<code>shift_type</code>.
+- Set <code>save_values=True</code> (optionally with <code>values_output_dir</code> and <code>values_filename_prefix</code>) to write both shift and FWHM arrays to disk.</p>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">brillouin_analyzer_src.brillouin_plotter</span><span class="w"> </span><span class="kn">import</span> <span class="n">plot_cell_histogram</span>
+<span class="n">plot_cell_histogram</span><span class="p">(</span>
+    <span class="p">[</span><span class="n">cells_treated</span><span class="p">],</span>
+    <span class="n">title</span><span class="o">=</span><span class="s2">&quot;Shift distribution&quot;</span><span class="p">,</span>
+    <span class="n">cell_or_background</span><span class="o">=</span><span class="s2">&quot;cell&quot;</span><span class="p">,</span>
+    <span class="n">data_type</span><span class="o">=</span><span class="s2">&quot;shift&quot;</span><span class="p">,</span>
+    <span class="n">shift_type</span><span class="o">=</span><span class="s2">&quot;all&quot;</span><span class="p">,</span>
+    <span class="n">bin_number</span><span class="o">=</span><span class="mi">20</span><span class="p">,</span>
+    <span class="n">save_values</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="n">values_output_dir</span><span class="o">=</span><span class="s2">&quot;exports&quot;</span>
+<span class="p">)</span>
+</code></pre></div>
+
+  <br>
+    
+
+    
+    
+      
+    
+
+  <div class="row wm-article-nav-buttons" role="navigation" aria-label="navigation">
+    
+    <div class="wm-article-nav pull-right">
+      <a href="../cell_selection/" class="btn btn-xs btn-default pull-right">
+        Next
+        <i class="fa fa-chevron-right" aria-hidden="true"></i>
+      </a>
+      <a href="../cell_selection/" class="btn btn-xs btn-link">
+        Cell Selection
+      </a>
+    </div>
+    
+    <div class="wm-article-nav">
+      <a href="../manual_analysis/" class="btn btn-xs btn-default pull-left">
+        <i class="fa fa-chevron-left" aria-hidden="true"></i>
+        Previous</a><a href="../manual_analysis/" class="btn btn-xs btn-link">
+        Manual Analysis
+      </a>
+    </div>
+    
+  </div>
+
+    <br>
+</div>
+
+<footer class="container-fluid wm-page-content">
+  <p>Documentation built with <a href="https://www.mkdocs.org/">MkDocs</a> using <a href="https://github.com/gristlabs/mkdocs-windmill">Windmill</a> theme by Grist Labs.</p>
+</footer>
+
+</body>
+</html>

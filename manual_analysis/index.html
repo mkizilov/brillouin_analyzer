@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  
+  
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    
+    
+    
+    <link rel="shortcut icon" href="../img/favicon.ico">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0" />
+    <title>Manual Analysis - Brillouin Analyzer</title>
+    <link href="../css/bootstrap-3.3.7.min.css" rel="stylesheet">
+    <link href="../css/font-awesome-4.7.0.css" rel="stylesheet">
+    <link href="../css/base.css" rel="stylesheet">
+    <link rel="stylesheet" href="../css/highlight.css">
+    <!-- HTML5 shim and Respond.js IE8 support of HTML5 elements and media queries -->
+    <!--[if lt IE 9]>
+        <script src="https://oss.maxcdn.com/libs/html5shiv/3.7.0/html5shiv.js"></script>
+        <script src="https://oss.maxcdn.com/libs/respond.js/1.3.0/respond.min.js"></script>
+    <![endif]-->
+
+    <script src="../js/jquery-3.2.1.min.js"></script>
+    <script src="../js/bootstrap-3.3.7.min.js"></script>
+    <script src="../js/highlight.pack.js"></script>
+    
+    <base target="_top">
+    <script>
+      var base_url = '..';
+      var is_top_frame = false;
+        
+        var pageToc = [
+          {title: "Manual Analysis Module", url: "#_top", children: [
+              {title: "Typical Workflow", url: "#typical-workflow" },
+              {title: "Single spectrum: analyze_brillouin_spectrum_manual", url: "#single-spectrum-analyze_brillouin_spectrum_manual" },
+              {title: "Batch mode: analyze_brillouin_spectra_manual", url: "#batch-mode-analyze_brillouin_spectra_manual" },
+          ]},
+        ];
+
+    </script>
+    <script src="../js/base.js"></script> 
+</head>
+
+<body>
+<script>
+if (is_top_frame) { $('body').addClass('wm-top-page'); }
+</script>
+
+
+
+<div class="container-fluid wm-page-content">
+  <a name="_top"></a>
+    
+
+    
+    
+      
+    
+
+  <div class="row wm-article-nav-buttons" role="navigation" aria-label="navigation">
+    
+    <div class="wm-article-nav pull-right">
+      <a href="../plotting/" class="btn btn-xs btn-default pull-right">
+        Next
+        <i class="fa fa-chevron-right" aria-hidden="true"></i>
+      </a>
+      <a href="../plotting/" class="btn btn-xs btn-link">
+        Plotting
+      </a>
+    </div>
+    
+    <div class="wm-article-nav">
+      <a href="../parsing/" class="btn btn-xs btn-default pull-left">
+        <i class="fa fa-chevron-left" aria-hidden="true"></i>
+        Previous</a><a href="../parsing/" class="btn btn-xs btn-link">
+        Parsing
+      </a>
+    </div>
+    
+  </div>
+
+    
+
+    <h1 id="manual-analysis-module">Manual Analysis Module<a class="headerlink" href="#manual-analysis-module" title="Permanent link">&para;</a></h1>
+<p>The <code>brillouin_spectra_analyzer_manual</code> module lets you inspect a single spectrum to tune peak-finding parameters and then run the same settings over an entire 3D dataset. Use it right after parsing data with <code>parse_brillouin_set</code>.</p>
+<h2 id="typical-workflow">Typical Workflow<a class="headerlink" href="#typical-workflow" title="Permanent link">&para;</a></h2>
+<p>1) Parse spectra into a 3D array.<br />
+2) Call <code>analyze_brillouin_spectrum_manual</code> on a single pixel to pick laser/Brillouin windows and fitting options.<br />
+3) Reuse those parameters in <code>analyze_brillouin_spectra_manual</code> for a full slice or volume.<br />
+4) Visualize and segment the results with the plotting and cell-selection utilities.</p>
+<h2 id="single-spectrum-analyze_brillouin_spectrum_manual">Single spectrum: <code>analyze_brillouin_spectrum_manual</code><a class="headerlink" href="#single-spectrum-analyze_brillouin_spectrum_manual" title="Permanent link">&para;</a></h2>
+<p>Analyzes one spectrum from the cube (or a provided <code>spectrum_data</code>) and optionally plots the fit.</p>
+<p><strong>Key arguments</strong>
+- Coordinates: <code>x_coord</code>, <code>y_coord</code>, <code>z_coord</code> select the pixel; omit to inspect a random spectrum. <code>spectrum_cut_range</code> trims the waveform before processing.
+- Spectral geometry: <code>free_spectral_range</code> fits the quadratic VIPA calibration. Windows for peaks come from <code>laser_peak_ranges</code> (index windows or exact indices) and <code>brillouin_peak_ranges</code> (pairs of index windows or a tuple <code>(a_GHz, b_GHz)</code> around each laser).
+- Fitting: set <code>fit_lorentzians&gt;0</code> to fit Lorentzian peaks inside a ±window (GHz). Control bounds via <code>fwhm_bounds_GHz</code> and <code>center_slack_GHz</code>. <code>match_brilouin_parameters=True</code> locks all left/right Brillouin peaks to shared width/shift.
+- Filtering and weighting: provide <code>filter_settings</code> (Savgol, wavelet, Fourier, PCA, or custom callables) to denoise before peak finding; enable <code>baseline_spectra</code> or <code>poisson_weighting</code> if you need them.
+- Debugging and plots: <code>debug_plot</code> overlays search windows, <code>plot_PCA</code>/<code>pca_*</code> help to locate laser peaks, <code>make_plot</code> controls size, and <code>save_plot</code> writes the figure.</p>
+<p><strong>Outputs</strong></p>
+<p>Returns a dictionary containing:
+- <code>df</code>: per-peak rows with type, shift, FWHM, center/amplitude, and fit RMSE.
+- <code>spectrum</code>, <code>rescaled_x_axis</code>, and the detected <code>laser_peaks_indices</code> / <code>brillouin_peaks_indices</code>.
+- <code>fit_params</code> <code>(a, b, c)</code> from the VIPA calibration plus lists of per-peak shifts, FWHMs, amplitudes, and centers.
+- Flags showing which options were enabled (baseline, weighting, matching, etc.).</p>
+<p>Example:</p>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">brillouin_analyzer_src</span><span class="w"> </span><span class="kn">import</span> <span class="o">*</span>
+<span class="o">%</span><span class="n">load_ext</span> <span class="n">autoreload</span>
+<span class="o">%</span><span class="n">autoreload</span> <span class="mi">2</span>
+
+<span class="n">res</span> <span class="o">=</span> <span class="k">def</span><span class="w"> </span><span class="nf">analyze_brillouin_spectrum_manual</span><span class="p">(</span>
+    <span class="n">brillouin_spectra</span><span class="p">,</span>
+    <span class="n">x_coord</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+    <span class="n">y_coord</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+    <span class="n">z_coord</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+    <span class="n">free_spectral_range</span><span class="o">=</span><span class="mf">29.98</span><span class="p">,</span>
+    <span class="n">laser_peak_ranges</span><span class="o">=</span><span class="p">[</span><span class="mi">626</span><span class="p">,</span> <span class="mi">986</span><span class="p">,</span> <span class="mi">1269</span><span class="p">,</span> <span class="mi">1510</span><span class="p">],</span>
+    <span class="n">brillouin_peak_ranges</span><span class="o">=</span><span class="p">(</span><span class="mi">6</span><span class="p">,</span> <span class="mi">11</span><span class="p">),</span>
+    <span class="n">spectrum_cut_range</span><span class="o">=</span><span class="p">(</span><span class="mi">350</span><span class="p">,</span> <span class="mi">1600</span><span class="p">),</span>
+    <span class="n">make_plot</span><span class="o">=</span><span class="p">(</span><span class="mi">12</span><span class="p">,</span> <span class="mi">8</span><span class="p">),</span>
+    <span class="n">debug_plot</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+    <span class="c1"># Lorentzian half-window in GHz (0 -&gt; disable fitting)</span>
+    <span class="n">fit_lorentzians</span><span class="o">=</span><span class="mf">1.5</span><span class="p">,</span>
+
+    <span class="c1"># Optional filter pipeline configuration</span>
+    <span class="n">filter_settings</span><span class="o">=</span><span class="p">[{</span><span class="s1">&#39;type&#39;</span><span class="p">:</span> <span class="s1">&#39;savgol&#39;</span><span class="p">,</span> <span class="s1">&#39;params&#39;</span><span class="p">:</span> <span class="p">(</span><span class="mi">15</span><span class="p">,</span> <span class="mi">6</span><span class="p">)},</span>
+    <span class="p">{</span><span class="s1">&#39;type&#39;</span><span class="p">:</span> <span class="s1">&#39;wavelet&#39;</span><span class="p">,</span> <span class="s1">&#39;wavelet&#39;</span><span class="p">:</span> <span class="s1">&#39;db6&#39;</span><span class="p">,</span> <span class="s1">&#39;level&#39;</span><span class="p">:</span> <span class="mi">5</span><span class="p">},</span>
+    <span class="p">{</span><span class="s1">&#39;type&#39;</span><span class="p">:</span> <span class="s1">&#39;fft&#39;</span><span class="p">,</span> <span class="s1">&#39;params&#39;</span><span class="p">:</span> <span class="p">(</span><span class="mi">20</span><span class="p">,</span> <span class="mi">100</span><span class="p">)}],</span>
+    <span class="n">save_plot</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+
+    <span class="c1"># Optional constraints for Lorentzian fitting (GHz)</span>
+    <span class="n">fwhm_bounds_GHz</span><span class="o">=</span><span class="p">(</span><span class="mf">0.8</span><span class="p">,</span> <span class="mf">4.0</span><span class="p">),</span>     <span class="c1"># (min_fwhm, max_fwhm) or None</span>
+    <span class="n">center_slack_GHz</span><span class="o">=</span><span class="mf">0.5</span><span class="p">,</span>    <span class="c1"># ± slack around nominal center; if None, window-bound</span>
+    <span class="n">spectrum_data</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+    <span class="n">baseline_spectra</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+    <span class="n">poisson_weighting</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+    <span class="n">match_brilouin_parameters</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="n">ignore_brilouin_peaks</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+    <span class="n">plot_PCA</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+    <span class="n">pca_n_components</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span>
+    <span class="n">pca_params</span><span class="o">=</span><span class="p">{</span>
+        <span class="s1">&#39;svd_solver&#39;</span><span class="p">:</span> <span class="s1">&#39;full&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;whiten&#39;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+        <span class="s1">&#39;tol&#39;</span><span class="p">:</span> <span class="mf">0.0</span><span class="p">,</span>
+        <span class="s1">&#39;iterated_power&#39;</span><span class="p">:</span> <span class="mi">5</span><span class="p">,</span>
+        <span class="s1">&#39;random_state&#39;</span><span class="p">:</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="s1">&#39;copy&#39;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+        <span class="p">},</span>
+    <span class="n">pca_peak_finding_params</span><span class="o">=</span><span class="p">{</span>
+        <span class="s1">&#39;height&#39;</span><span class="p">:</span> <span class="mf">0.02</span><span class="p">,</span>  <span class="c1"># Minimum height of peaks</span>
+        <span class="s1">&#39;distance&#39;</span><span class="p">:</span> <span class="mi">100</span><span class="p">,</span>  <span class="c1"># Minimum horizontal distance between peaks</span>
+        <span class="s1">&#39;prominence&#39;</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span> <span class="c1"># Minimum prominence of peaks</span>
+        <span class="s1">&#39;width&#39;</span><span class="p">:</span> <span class="mi">2</span><span class="p">,</span> <span class="c1"># Minimum width of peaks</span>
+    <span class="p">}</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<h2 id="batch-mode-analyze_brillouin_spectra_manual">Batch mode: <code>analyze_brillouin_spectra_manual</code><a class="headerlink" href="#batch-mode-analyze_brillouin_spectra_manual" title="Permanent link">&para;</a></h2>
+<p>Runs the same analysis across a z-slice or the full volume.</p>
+<p><strong>Highlights</strong>
+- <code>z_coord=None</code> processes all slices; set an int to restrict to one slice.
+- Parallel execution via <code>max_workers</code> and <code>parallel_backend</code> (<code>auto</code>, <code>thread</code>, <code>process</code>). Use <code>max_workers=1</code> for reproducible sequential runs.
+- <code>laser_refit=True</code> performs a laser-only pre-pass to lock Rayleigh peak positions before full fitting. <code>refit</code> keeps a global VIPA refit (ignored when <code>laser_refit=True</code>).
+- Pass through the same peak windows, fitting, filtering, and matching options you validated on a single spectrum. <code>keep_waveforms=False</code> drops raw spectra from the results to save memory.</p>
+<p><strong>Returns</strong></p>
+<ul>
+<li>A <code>BrillouinPeaksMap</code> (or list of maps if <code>z_coord=None</code>) keyed by <code>(x, y, z)</code> with the per-pixel result dictionaries. The lateral step is stored internally for plotting and cell selection.</li>
+</ul>
+<p>Example:</p>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">brillouin_analyzer_src.brillouin_spectra_analyzer_manual</span><span class="w"> </span><span class="kn">import</span> <span class="n">analyze_brillouin_spectra_manual</span>
+
+<span class="n">peaks_maps</span> <span class="o">=</span> <span class="n">analyze_brillouin_spectra_manual</span><span class="p">(</span>
+    <span class="n">data</span><span class="p">,</span>
+    <span class="n">z_coord</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+    <span class="n">free_spectral_range</span><span class="o">=</span><span class="mf">29.98</span><span class="p">,</span>
+    <span class="n">laser_peak_ranges</span><span class="o">=</span><span class="p">[</span><span class="mi">626</span><span class="p">,</span> <span class="mi">986</span><span class="p">,</span> <span class="mi">1269</span><span class="p">,</span> <span class="mi">1510</span><span class="p">],</span>
+    <span class="n">brillouin_peak_ranges</span><span class="o">=</span><span class="p">(</span><span class="mi">6</span><span class="p">,</span> <span class="mi">11</span><span class="p">),</span>
+    <span class="n">spectrum_cut_range</span><span class="o">=</span><span class="p">(</span><span class="mi">350</span><span class="p">,</span> <span class="mi">1600</span><span class="p">),</span>
+    <span class="n">fit_lorentzians</span><span class="o">=</span><span class="mf">1.5</span><span class="p">,</span>
+    <span class="n">filter_settings</span><span class="o">=</span><span class="p">[{</span><span class="s1">&#39;type&#39;</span><span class="p">:</span> <span class="s1">&#39;savgol&#39;</span><span class="p">,</span> <span class="s1">&#39;params&#39;</span><span class="p">:</span> <span class="p">(</span><span class="mi">15</span><span class="p">,</span> <span class="mi">6</span><span class="p">)},</span>
+    <span class="p">{</span><span class="s1">&#39;type&#39;</span><span class="p">:</span> <span class="s1">&#39;wavelet&#39;</span><span class="p">,</span> <span class="s1">&#39;wavelet&#39;</span><span class="p">:</span> <span class="s1">&#39;db6&#39;</span><span class="p">,</span> <span class="s1">&#39;level&#39;</span><span class="p">:</span> <span class="mi">5</span><span class="p">},</span>
+    <span class="p">{</span><span class="s1">&#39;type&#39;</span><span class="p">:</span> <span class="s1">&#39;fft&#39;</span><span class="p">,</span> <span class="s1">&#39;params&#39;</span><span class="p">:</span> <span class="p">(</span><span class="mi">20</span><span class="p">,</span> <span class="mi">100</span><span class="p">)}],</span>
+    <span class="n">refit</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+    <span class="n">laser_refit</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="n">match_brilouin_parameters</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="n">max_workers</span><span class="o">=</span><span class="mi">8</span><span class="p">,</span>
+    <span class="n">parallel_backend</span><span class="o">=</span><span class="s1">&#39;auto&#39;</span>
+    <span class="n">keep_waveforms</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+    <span class="n">baseline_spectra</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+    <span class="n">poisson_weighting</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+    <span class="n">plot_PCA</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+    <span class="n">pca_n_components</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span>
+    <span class="n">pca_params</span><span class="o">=</span><span class="p">{</span>
+        <span class="s1">&#39;svd_solver&#39;</span><span class="p">:</span> <span class="s1">&#39;full&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;whiten&#39;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+        <span class="s1">&#39;tol&#39;</span><span class="p">:</span> <span class="mf">0.0</span><span class="p">,</span>
+        <span class="s1">&#39;iterated_power&#39;</span><span class="p">:</span> <span class="mi">5</span><span class="p">,</span>
+        <span class="s1">&#39;random_state&#39;</span><span class="p">:</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="s1">&#39;copy&#39;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+        <span class="p">},</span>
+    <span class="n">pca_peak_finding_params</span><span class="o">=</span><span class="p">{</span>
+        <span class="s1">&#39;height&#39;</span><span class="p">:</span> <span class="mf">0.02</span><span class="p">,</span>  <span class="c1"># Minimum height of peaks</span>
+        <span class="s1">&#39;distance&#39;</span><span class="p">:</span> <span class="mi">100</span><span class="p">,</span>  <span class="c1"># Minimum horizontal distance between peaks</span>
+        <span class="s1">&#39;prominence&#39;</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span> <span class="c1"># Minimum prominence of peaks</span>
+        <span class="s1">&#39;width&#39;</span><span class="p">:</span> <span class="mi">2</span><span class="p">,</span> <span class="c1"># Minimum width of peaks</span>
+    <span class="p">}</span>
+<span class="p">)</span>
+</code></pre></div>
+
+  <br>
+    
+
+    
+    
+      
+    
+
+  <div class="row wm-article-nav-buttons" role="navigation" aria-label="navigation">
+    
+    <div class="wm-article-nav pull-right">
+      <a href="../plotting/" class="btn btn-xs btn-default pull-right">
+        Next
+        <i class="fa fa-chevron-right" aria-hidden="true"></i>
+      </a>
+      <a href="../plotting/" class="btn btn-xs btn-link">
+        Plotting
+      </a>
+    </div>
+    
+    <div class="wm-article-nav">
+      <a href="../parsing/" class="btn btn-xs btn-default pull-left">
+        <i class="fa fa-chevron-left" aria-hidden="true"></i>
+        Previous</a><a href="../parsing/" class="btn btn-xs btn-link">
+        Parsing
+      </a>
+    </div>
+    
+  </div>
+
+    <br>
+</div>
+
+<footer class="container-fluid wm-page-content">
+  <p>Documentation built with <a href="https://www.mkdocs.org/">MkDocs</a> using <a href="https://github.com/gristlabs/mkdocs-windmill">Windmill</a> theme by Grist Labs.</p>
+</footer>
+
+</body>
+</html>

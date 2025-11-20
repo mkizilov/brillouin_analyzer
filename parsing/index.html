@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  
+  
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    
+    
+    
+    <link rel="shortcut icon" href="../img/favicon.ico">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0" />
+    <title>Parsing - Brillouin Analyzer</title>
+    <link href="../css/bootstrap-3.3.7.min.css" rel="stylesheet">
+    <link href="../css/font-awesome-4.7.0.css" rel="stylesheet">
+    <link href="../css/base.css" rel="stylesheet">
+    <link rel="stylesheet" href="../css/highlight.css">
+    <!-- HTML5 shim and Respond.js IE8 support of HTML5 elements and media queries -->
+    <!--[if lt IE 9]>
+        <script src="https://oss.maxcdn.com/libs/html5shiv/3.7.0/html5shiv.js"></script>
+        <script src="https://oss.maxcdn.com/libs/respond.js/1.3.0/respond.min.js"></script>
+    <![endif]-->
+
+    <script src="../js/jquery-3.2.1.min.js"></script>
+    <script src="../js/bootstrap-3.3.7.min.js"></script>
+    <script src="../js/highlight.pack.js"></script>
+    
+    <base target="_top">
+    <script>
+      var base_url = '..';
+      var is_top_frame = false;
+        
+        var pageToc = [
+          {title: "Parsing Module", url: "#_top", children: [
+              {title: "Functions", url: "#functions" },
+              {title: "File Naming Convention", url: "#file-naming-convention" },
+              {title: "Lateral Step Detection", url: "#lateral-step-detection" },
+              {title: "ZIP Archive Support", url: "#zip-archive-support" },
+          ]},
+        ];
+
+    </script>
+    <script src="../js/base.js"></script> 
+</head>
+
+<body>
+<script>
+if (is_top_frame) { $('body').addClass('wm-top-page'); }
+</script>
+
+
+
+<div class="container-fluid wm-page-content">
+  <a name="_top"></a>
+    
+
+    
+    
+      
+    
+
+  <div class="row wm-article-nav-buttons" role="navigation" aria-label="navigation">
+    
+    <div class="wm-article-nav pull-right">
+      <a href="../manual_analysis/" class="btn btn-xs btn-default pull-right">
+        Next
+        <i class="fa fa-chevron-right" aria-hidden="true"></i>
+      </a>
+      <a href="../manual_analysis/" class="btn btn-xs btn-link">
+        Manual Analysis
+      </a>
+    </div>
+    
+    <div class="wm-article-nav">
+      <a href=".." class="btn btn-xs btn-default pull-left">
+        <i class="fa fa-chevron-left" aria-hidden="true"></i>
+        Previous</a><a href=".." class="btn btn-xs btn-link">
+        Home
+      </a>
+    </div>
+    
+  </div>
+
+    
+
+    <h1 id="parsing-module">Parsing Module<a class="headerlink" href="#parsing-module" title="Permanent link">&para;</a></h1>
+<p>The <code>brillouin_parser</code> module provides functionality to load and parse Brillouin and Raman spectra data from directories or ZIP archives.</p>
+<h2 id="functions">Functions<a class="headerlink" href="#functions" title="Permanent link">&para;</a></h2>
+<h3 id="parse_brillouin_set"><code>parse_brillouin_set</code><a class="headerlink" href="#parse_brillouin_set" title="Permanent link">&para;</a></h3>
+<div class="codehilite"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">parse_brillouin_set</span><span class="p">(</span><span class="n">directory_path</span><span class="p">,</span> <span class="n">file_label</span><span class="p">):</span>
+    <span class="o">...</span>
+</code></pre></div>
+
+<p>Parses a set of Brillouin spectra files.</p>
+<p><strong>Arguments:</strong></p>
+<ul>
+<li><code>directory_path</code> (str): Path to the directory or ZIP file containing the data.</li>
+<li><code>file_label</code> (str): The label used to identify the files (e.g., the prefix of the filenames).</li>
+</ul>
+<p><strong>Returns:</strong></p>
+<ul>
+<li><code>numpy.ndarray</code>: A 3D array of object type, where each element contains the spectral data (intensity) for a specific (x, y, z) coordinate. The indices of the array correspond to the spatial coordinates.</li>
+</ul>
+<p><strong>Description:</strong></p>
+<p>This function locates the dataset (extracting it from a ZIP file if necessary), finds the lateral step size, and reads <code>.asc</code> files matching the pattern <code>{file_label}B*_Z...Y...X...asc</code>. It constructs a 3D array representing the spatial distribution of the spectra.</p>
+<p>It also registers the lateral step metadata using <code>data_registry.register_lateral_step</code>.</p>
+<h3 id="parse_raman_set"><code>parse_raman_set</code><a class="headerlink" href="#parse_raman_set" title="Permanent link">&para;</a></h3>
+<div class="codehilite"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">parse_raman_set</span><span class="p">(</span><span class="n">directory_path</span><span class="p">,</span> <span class="n">file_label</span><span class="p">):</span>
+    <span class="o">...</span>
+</code></pre></div>
+
+<p>Parses a set of Raman spectra files.</p>
+<p><strong>Arguments:</strong></p>
+<ul>
+<li><code>directory_path</code> (str): Path to the directory or ZIP file containing the data.</li>
+<li><code>file_label</code> (str): The label used to identify the files.</li>
+</ul>
+<p><strong>Returns:</strong></p>
+<ul>
+<li><code>dict</code> or <code>None</code>: A dictionary where keys are <code>(x, y, z)</code> tuples and values are the spectral data (intensity), or <code>None</code> if no files are found. (Note: The current implementation returns a dictionary, unlike <code>parse_brillouin_set</code> which returns a 3D array. <em>Check implementation details if this is intended behavior</em>).</li>
+</ul>
+<p><strong>Description:</strong></p>
+<p>Similar to <code>parse_brillouin_set</code>, this function reads <code>.asc</code> files matching the pattern <code>{file_label}R*_Z...Y...X...asc</code>.</p>
+<h2 id="file-naming-convention">File Naming Convention<a class="headerlink" href="#file-naming-convention" title="Permanent link">&para;</a></h2>
+<p>The parser expects files to follow a specific naming convention to extract spatial coordinates:</p>
+<ul>
+<li><strong>Brillouin files:</strong> <code>{file_label}B*_Z{z}Y{y}X{x}.asc</code></li>
+<li><strong>Raman files:</strong> <code>{file_label}R*_Z{z}Y{y}X{x}.asc</code></li>
+</ul>
+<p>Where <code>{x}</code>, <code>{y}</code>, and <code>{z}</code> are integer coordinates.</p>
+<h2 id="lateral-step-detection">Lateral Step Detection<a class="headerlink" href="#lateral-step-detection" title="Permanent link">&para;</a></h2>
+<p>The parser attempts to automatically detect the "Lateral step" size from text files in the directory. It looks for files named:
+1.  <code>{file_label}.txt</code>
+2.  <code>{sanitized_label}.txt</code> (spaces replaced by underscores)
+3.  <code>file_label.txt</code></p>
+<p>It searches for a line matching the pattern <code>Lateral step : {value}</code>.</p>
+<h2 id="zip-archive-support">ZIP Archive Support<a class="headerlink" href="#zip-archive-support" title="Permanent link">&para;</a></h2>
+<p>The functions support reading data directly from ZIP archives. If <code>directory_path</code> points to a <code>.zip</code> file, the parser will:
+1.  Extract the archive to a temporary directory.
+2.  Search for a folder matching <code>file_label</code> or its sanitized version.
+3.  If not found, check if there is a single top-level directory.
+4.  If not found, search for a directory containing files starting with <code>file_label</code>.
+5.  Use the found directory as the source for parsing.</p>
+
+  <br>
+    
+
+    
+    
+      
+    
+
+  <div class="row wm-article-nav-buttons" role="navigation" aria-label="navigation">
+    
+    <div class="wm-article-nav pull-right">
+      <a href="../manual_analysis/" class="btn btn-xs btn-default pull-right">
+        Next
+        <i class="fa fa-chevron-right" aria-hidden="true"></i>
+      </a>
+      <a href="../manual_analysis/" class="btn btn-xs btn-link">
+        Manual Analysis
+      </a>
+    </div>
+    
+    <div class="wm-article-nav">
+      <a href=".." class="btn btn-xs btn-default pull-left">
+        <i class="fa fa-chevron-left" aria-hidden="true"></i>
+        Previous</a><a href=".." class="btn btn-xs btn-link">
+        Home
+      </a>
+    </div>
+    
+  </div>
+
+    <br>
+</div>
+
+<footer class="container-fluid wm-page-content">
+  <p>Documentation built with <a href="https://www.mkdocs.org/">MkDocs</a> using <a href="https://github.com/gristlabs/mkdocs-windmill">Windmill</a> theme by Grist Labs.</p>
+</footer>
+
+</body>
+</html>
