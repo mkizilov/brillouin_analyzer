@@ -1,0 +1,23 @@
+site_name: Brillouin Analyzer
+site_description: Tools for parsing, analyzing, plotting, and segmenting Brillouin/Raman datasets.
+site_dir: site
+
+theme:
+  name: windmill
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - codehilite
+  - toc:
+      permalink: true
+  - tables
+
+nav:
+  - Home: index.md
+  - Parsing: parsing.md
+  - Manual Analysis: manual_analysis.md
+  - Plotting: plotting.md
+  - Cell Selection: cell_selection.md
