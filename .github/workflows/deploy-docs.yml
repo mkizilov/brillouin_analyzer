@@ -18,6 +18,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for git diff
 
       - name: Check if mkdocs.yml exists
         id: check_mkdocs
@@ -40,7 +42,10 @@ jobs:
         if: steps.check_mkdocs.outputs.mkdocs == 'true'
         run: |
           pip install --upgrade pip
-          pip install mkdocs mkdocs-material
+          pip install mkdocs
+          # Try to install common mkdocs themes and plugins
+          pip install mkdocs-material || echo "Material theme not needed"
+          pip install mkdocs-windmill || echo "Windmill theme not available via pip, will try with default or installed theme"
 
       - name: Build documentation
         if: steps.check_mkdocs.outputs.mkdocs == 'true'
