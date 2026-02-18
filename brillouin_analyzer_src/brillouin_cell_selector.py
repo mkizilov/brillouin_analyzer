@@ -35,7 +35,12 @@ def detect_cells(
     fwhm_range=('auto', 60, 99),
     scaling_factor='auto',
     mark_all=False,
-    pixel_aggregation='mean'   # New parameter for per-pixel aggregation
+    pixel_aggregation='mean',   # New parameter for per-pixel aggregation
+    plot_heatmap=False,  # Whether to plot heatmaps for shift and FWHM
+    heatmap_save_path=None,  # Path to save heatmap figures
+    heatmap_colorbar_range=("auto", 60, 99),  # Colorbar range for heatmaps
+    heatmap_cmap='jet',  # Colormap for heatmaps
+    heatmap_annotate=True  # Whether to annotate heatmaps
 ):
     """
     Plots an RGB heatmap where:
@@ -102,6 +107,16 @@ def detect_cells(
         If True, treats the entire image as a single cell.
     pixel_aggregation : str, optional
         Method for aggregating pixel values across multiple maps ('mean' or 'median').
+    plot_heatmap : bool, optional
+        If True, plots heatmaps of shift and FWHM with unselected areas using the lowest color from colorbar.
+    heatmap_save_path : str, optional
+        Base path for saving heatmap figures (one for shift, one for FWHM).
+    heatmap_colorbar_range : tuple, optional
+        Colorbar range for heatmaps. Default is ('auto', 60, 99).
+    heatmap_cmap : str, optional
+        Colormap for heatmaps. Default is 'jet'.
+    heatmap_annotate : bool, optional
+        Whether to annotate heatmaps with statistical information. Default is True.
     
     Returns:
     --------
@@ -697,5 +712,197 @@ def detect_cells(
     if save_fig and fig_path:
         plt.savefig(fig_path)
     plt.show()
+
+    # Plot heatmaps if requested
+    if plot_heatmap:
+        from matplotlib import patheffects
+        
+        def _apply_filter_to_data(data_map, ftype, fparams):
+            """Apply the specified filter to the data."""
+            filtered = np.copy(data_map)
+            if ftype == 'median':
+                filtered = median_filter(filtered, **fparams)
+            elif ftype == 'gaussian':
+                filtered = gaussian_filter(filtered, **fparams)
+            elif ftype == 'bilateral':
+                filtered = denoise_bilateral(filtered, **fparams)
+            elif ftype == 'wiener':
+                filtered = wiener(filtered, **fparams)
+            elif ftype == 'anisotropic_diffusion':
+                filtered = denoise_tv_chambolle(filtered, **fparams)
+            elif ftype == 'total_variation':
+                filtered = denoise_tv_bregman(filtered, **fparams)
+            elif ftype == 'non_local_means':
+                filtered = denoise_nl_means(filtered, **fparams)
+            return filtered
+        
+        def _plot_cell_heatmap(data_map, mask, cell_mask, data_type_label, 
+                               colorbar_range, cmap, annotate_data, scale, save_path=None):
+            """
+            Helper function to plot heatmaps with unselected areas shown as lowest color.
+            """
+            # Create a copy for visualization
+            vis_data = np.copy(data_map)
+            
+            # Determine vmin/vmax from colorbar_range
+            vmin, vmax = None, None
+            if colorbar_range is not None:
+                # Only use valid data points for determining range
+                valid_data = vis_data[np.isfinite(vis_data)]
+                if len(valid_data) > 0:
+                    if colorbar_range == 'auto':
+                        p_low, p_high = 2, 98
+                        vmin, vmax = np.nanpercentile(valid_data, [p_low, p_high])
+                    elif isinstance(colorbar_range, tuple) and len(colorbar_range) == 3 and colorbar_range[0] == 'auto':
+                        _, p_low, p_high = colorbar_range
+                        vmin, vmax = np.nanpercentile(valid_data, [p_low, p_high])
+                    elif isinstance(colorbar_range, (list, tuple)) and len(colorbar_range) == 2:
+                        vmin, vmax = colorbar_range
+            
+            if vmin is None or vmax is None:
+                vmin = np.nanmin(vis_data)
+                vmax = np.nanmax(vis_data)
+            
+            # Fill unselected areas with vmin (lowest color from colorbar)
+            vis_data[~mask] = vmin
+            
+            # Create figure
+            plt.figure(figsize=(8, 6))
+            im = plt.imshow(
+                vis_data,
+                cmap=cmap,
+                origin='lower',
+                aspect='auto',
+                vmin=vmin,
+                vmax=vmax,
+                interpolation=None
+            )
+            
+            plt.xlabel("μm", fontsize=20)
+            plt.ylabel("μm", fontsize=20)
+            plt.ticklabel_format(style='sci', axis='both', scilimits=(0, 0))
+            
+            # Set the ticks based on the scaling factors
+            x_ticks = np.arange(0, vis_data.shape[1], step=10) * scale
+            y_ticks = np.arange(0, vis_data.shape[0], step=10) * scale
+            
+            def _format_tick_label(value):
+                rounded = int(np.round(value))
+                if np.isclose(value, rounded):
+                    return str(rounded)
+                formatted = f"{value:.2f}".rstrip('0').rstrip('.')
+                return formatted
+            
+            x_tick_labels = [_format_tick_label(val) for val in x_ticks]
+            y_tick_labels = [_format_tick_label(val) for val in y_ticks]
+            
+            plt.xticks(
+                ticks=np.arange(0, vis_data.shape[1], step=10),
+                labels=x_tick_labels,
+                rotation=45
+            )
+            plt.yticks(
+                ticks=np.arange(0, vis_data.shape[0], step=10),
+                labels=y_tick_labels
+            )
+            
+            ax = plt.gca()
+            ax.tick_params(axis='both', which='major', labelsize=20)
+            
+            # Add colorbar with label
+            cbar = plt.colorbar(im)
+            cbar_label = f"Brillouin {data_type_label} [GHz]"
+            cbar.set_label(cbar_label, fontsize=20)
+            cbar.ax.tick_params(labelsize=20)
+            
+            # Annotate statistical information
+            if annotate_data:
+                valid_vals = vis_data[np.isfinite(vis_data) & mask]
+                if len(valid_vals) > 0:
+                    mean_val = np.nanmean(valid_vals)
+                    median_val = np.nanmedian(valid_vals)
+                    std_val = np.nanstd(valid_vals)
+                else:
+                    mean_val = median_val = std_val = np.nan
+                    
+                ax.text(
+                    0.95,
+                    0.95,
+                    f"Mean: {mean_val:.2f}\nMedian: {median_val:.2f}\nStd: {std_val:.2f}",
+                    verticalalignment='top',
+                    horizontalalignment='right',
+                    transform=ax.transAxes,
+                    color='white',
+                    fontsize=10,
+                    bbox=dict(facecolor='black', alpha=0.5, pad=5)
+                )
+            
+            plt.tight_layout()
+            if save_path:
+                plt.savefig(save_path)
+            plt.show()
+        
+        # Create mask for selected regions (cells)
+        heatmap_mask = cell_mask.copy()
+        
+        # Apply filter to data for heatmaps
+        if filter_type is not None and filter_params is not None:
+            shift_data_for_heatmap = _apply_filter_to_data(all_shift_original, filter_type, filter_params)
+            fwhm_data_for_heatmap = _apply_filter_to_data(fwhm_all_original, filter_type, filter_params)
+        else:
+            shift_data_for_heatmap = all_shift_original
+            fwhm_data_for_heatmap = fwhm_all_original
+        
+        # Create safe filename from title
+        safe_title = title.replace(' ', '_').replace('/', '_').replace('\\', '_').replace(':', '_').replace('-', '_')
+        
+        # Plot shift heatmap
+        shift_save_path = None
+        if heatmap_save_path:
+            from pathlib import Path
+            base = Path(heatmap_save_path)
+            # Check if path is a directory or has a file extension
+            if base.suffix:
+                # It's a file path, use parent as directory
+                directory = base.parent
+            else:
+                # It's a directory path
+                directory = base
+            shift_save_path = directory / f"{safe_title}_shift_heatmap.png"
+        
+        _plot_cell_heatmap(
+            shift_data_for_heatmap,
+            heatmap_mask,
+            cell_mask,
+            "Shift",
+            heatmap_colorbar_range,
+            heatmap_cmap,
+            heatmap_annotate,
+            scaling_factor,
+            save_path=shift_save_path
+        )
+        
+        # Plot FWHM heatmap
+        fwhm_save_path = None
+        if heatmap_save_path:
+            from pathlib import Path
+            base = Path(heatmap_save_path)
+            if base.suffix:
+                directory = base.parent
+            else:
+                directory = base
+            fwhm_save_path = directory / f"{safe_title}_fwhm_heatmap.png"
+        
+        _plot_cell_heatmap(
+            fwhm_data_for_heatmap,
+            heatmap_mask,
+            cell_mask,
+            "FWHM",
+            heatmap_colorbar_range,
+            heatmap_cmap,
+            heatmap_annotate,
+            scaling_factor,
+            save_path=fwhm_save_path
+        )
 
     return cell_shift_maps, cell_fwhm_maps, background_shift_maps, background_fwhm_maps

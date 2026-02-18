@@ -7,6 +7,7 @@ from collections import Counter
 from contextlib import contextmanager
 
 import numpy as np
+from tqdm.auto import tqdm
 
 from .data_registry import register_lateral_step
 
@@ -40,23 +41,23 @@ def _auto_detect_file_label(directory_path):
     """
     if not os.path.isdir(directory_path):
         return None
-    
+
     file_labels = []
     # Pattern matches: {file_label}B (optional chars) _ (anything) _ Z{num}Y{num}X{num}.asc
     # We're looking for the prefix before 'B'
-    pattern = re.compile(r'(.+?)B.*?_Z\d+Y\d+X\d+\.asc$', re.IGNORECASE)
-    
+    pattern = re.compile(r'(.+?)B_Z\d+Y\d+X\d+\.asc$')
+
     for file_name in os.listdir(directory_path):
         if not file_name.lower().endswith('.asc'):
             continue
-        
+
         match = pattern.match(file_name)
         if match:
             file_labels.append(match.group(1))
-    
+
     if not file_labels:
         return None
-    
+
     # Return the most common file_label (in case there are variations)
     counter = Counter(file_labels)
     return counter.most_common(1)[0][0]
@@ -195,7 +196,7 @@ def parse_brillouin_set(directory_path, file_label=None):
         )
 
 
-def parse_brillouin_set_directory(directory_path):
+def parse_brillouin_set_directory(directory_path, expand_label=False, show_progress=True):
     """Parse Brillouin spectroscopy data from all subdirectories and zip files.
     
     Recursively searches through subdirectories to find directories or zip files
@@ -204,6 +205,8 @@ def parse_brillouin_set_directory(directory_path):
     
     Args:
         directory_path: Path to the root directory to search for data.
+        expand_label: If True, prepend folder name to file_label (folder_name_file_label).
+                     If False, use only file_label as key. Default is False.
     
     Returns:
         dict: Dictionary mapping file_label strings to numpy.ndarray spectra.
@@ -211,86 +214,137 @@ def parse_brillouin_set_directory(directory_path):
     """
     if not os.path.isdir(directory_path):
         raise ValueError(f"Directory path '{directory_path}' is not a valid directory.")
-    
+
     results = {}
-    
-    # Walk through all subdirectories
+
+    # First pass: count how many datasets we will attempt to parse
+    total_datasets = 0
+    for root, dirs, files in os.walk(directory_path):
+        if '__MACOSX' in dirs:
+            dirs.remove('__MACOSX')
+
+        has_brillouin_files = any(
+            f.lower().endswith('.asc') and 'B' in f.upper()
+            for f in files
+        )
+        zip_files = [f for f in files if f.lower().endswith('.zip')]
+
+        if has_brillouin_files:
+            total_datasets += 1
+        total_datasets += len(zip_files)
+
+    # Setup progress bar
+    pbar = None
+    if show_progress and total_datasets > 0:
+        pbar = tqdm(
+            total=total_datasets,
+            desc="Parsing datasets",
+            unit="dataset",
+        )
+
+    # Second pass: original parsing logic, now with progress updates
     for root, dirs, files in os.walk(directory_path):
         # Skip __MACOSX directories
         if '__MACOSX' in dirs:
             dirs.remove('__MACOSX')
-        
+
         # Check if current directory has Brillouin data files
         has_brillouin_files = any(
             f.lower().endswith('.asc') and 'B' in f.upper()
             for f in files
         )
-        
+
         # Check for zip files in current directory
         zip_files = [f for f in files if f.lower().endswith('.zip')]
-        
+
         # Try to parse directory if it has Brillouin files
         if has_brillouin_files:
             try:
-                spectra = parse_brillouin_set(root)
-                if spectra is not None:
-                    # Get the file_label that was used for parsing
-                    # We need to detect it again to use as the key
-                    with _materialize_dataset(root, None) as working_dir:
-                        file_label = _auto_detect_file_label(working_dir)
-                        if file_label is None:
-                            # Try recursive search if not found in top level
-                            for walk_root, walk_dirs, walk_files in os.walk(working_dir):
-                                if '__MACOSX' in walk_dirs:
-                                    walk_dirs.remove('__MACOSX')
-                                file_label = _auto_detect_file_label(walk_root)
-                                if file_label:
-                                    break
-                        
-                        if file_label:
-                            # Handle duplicate file_labels by appending a suffix
+                # Detect file_label first to avoid duplicate materialization
+                with _materialize_dataset(root, None) as working_dir:
+                    file_label = _auto_detect_file_label(working_dir)
+                    if file_label is None:
+                        # Try recursive search if not found in top level
+                        for walk_root, walk_dirs, walk_files in os.walk(working_dir):
+                            if '__MACOSX' in walk_dirs:
+                                walk_dirs.remove('__MACOSX')
+                            file_label = _auto_detect_file_label(walk_root)
+                            if file_label:
+                                break
+                
+                if file_label:
+                    # Parse with the detected file_label
+                    spectra = parse_brillouin_set(root, file_label=file_label)
+                    if spectra is not None:
+                        # Optionally expand label with parent folder and current folder name
+                        if expand_label:
+                            parent_folder = os.path.basename(os.path.dirname(root))
+                            current_folder = os.path.basename(root)
+                            original_label = f"{parent_folder}_{current_folder}_{file_label}"
+                        else:
                             original_label = file_label
-                            counter = 1
-                            while file_label in results:
-                                file_label = f"{original_label}_{counter}"
-                                counter += 1
-                            
-                            results[file_label] = spectra
-            except (ValueError, FileNotFoundError) as e:
+
+                        # Handle duplicate file_labels by appending a suffix
+                        label_key = original_label
+                        counter = 1
+                        while label_key in results:
+                            label_key = f"{original_label}_{counter}"
+                            counter += 1
+
+                        results[label_key] = spectra
+            except (ValueError, FileNotFoundError):
                 # Skip directories that can't be parsed
-                continue
-        
+                pass
+            finally:
+                if pbar is not None:
+                    pbar.update(1)
+
         # Try to parse zip files
         for zip_file in zip_files:
             zip_path = os.path.join(root, zip_file)
             try:
-                spectra = parse_brillouin_set(zip_path)
-                if spectra is not None:
-                    # Get the file_label that was used for parsing
-                    with _materialize_dataset(zip_path, None) as working_dir:
-                        file_label = _auto_detect_file_label(working_dir)
-                        if file_label is None:
-                            # Try recursive search if not found in top level
-                            for walk_root, walk_dirs, walk_files in os.walk(working_dir):
-                                if '__MACOSX' in walk_dirs:
-                                    walk_dirs.remove('__MACOSX')
-                                file_label = _auto_detect_file_label(walk_root)
-                                if file_label:
-                                    break
-                        
-                        if file_label:
-                            # Handle duplicate file_labels by appending a suffix
+                # Detect file_label first to avoid duplicate materialization
+                with _materialize_dataset(zip_path, None) as working_dir:
+                    file_label = _auto_detect_file_label(working_dir)
+                    if file_label is None:
+                        # Try recursive search if not found in top level
+                        for walk_root, walk_dirs, walk_files in os.walk(working_dir):
+                            if '__MACOSX' in walk_dirs:
+                                walk_dirs.remove('__MACOSX')
+                            file_label = _auto_detect_file_label(walk_root)
+                            if file_label:
+                                break
+                
+                if file_label:
+                    # Parse with the detected file_label
+                    spectra = parse_brillouin_set(zip_path, file_label=file_label)
+                    if spectra is not None:
+                        # Optionally expand label with parent folder and zip filename (without extension)
+                        if expand_label:
+                            parent_folder = os.path.basename(os.path.dirname(zip_path))
+                            zip_name = os.path.splitext(zip_file)[0]
+                            original_label = f"{parent_folder}_{zip_name}_{file_label}"
+                        else:
                             original_label = file_label
-                            counter = 1
-                            while file_label in results:
-                                file_label = f"{original_label}_{counter}"
-                                counter += 1
-                            
-                            results[file_label] = spectra
-            except (ValueError, FileNotFoundError) as e:
+
+                        # Handle duplicate file_labels by appending a suffix
+                        label_key = original_label
+                        counter = 1
+                        while label_key in results:
+                            label_key = f"{original_label}_{counter}"
+                            counter += 1
+
+                        results[label_key] = spectra
+            except (ValueError, FileNotFoundError):
                 # Skip zip files that can't be parsed
-                continue
-    
+                pass
+            finally:
+                if pbar is not None:
+                    pbar.update(1)
+
+    if pbar is not None:
+        pbar.close()
+
     return results
 
 
@@ -298,17 +352,36 @@ def _parse_brillouin_directory(directory_path, source_path, file_label):
     data_dict = {}
     files = os.listdir(directory_path)
     lateral_step = _find_lateral_step(directory_path, file_label)
-    # Check if files exist
+    
+    # Regex pattern for matching files: {file_label}B_Z{num}Y{num}X{num}.asc
+    file_pattern = re.compile(
+        re.escape(file_label) + r'B_Z(\d+)Y(\d+)X(\d+)\.asc$'
+    )
+    
     for file_name in files:
-        if file_name.startswith(file_label + "B") and file_name.endswith('.asc'):
-            parts = file_name.split('_')
-            coords = parts[-1].replace('.asc', '')
-            z_coord = int(coords.split('Z')[1].split('Y')[0])
-            y_coord = int(coords.split('Y')[1].split('X')[0])
-            x_coord = int(coords.split('X')[1])
+        match = file_pattern.match(file_name)
+        if match:
+            z_coord = int(match.group(1))
+            y_coord = int(match.group(2))
+            x_coord = int(match.group(3))
             file_path = os.path.join(directory_path, file_name)
-            data = np.loadtxt(file_path)
-            data_dict[(x_coord, y_coord, z_coord)] = data[:, 1]  # Second column is spectral data
+            
+            try:
+                data = np.loadtxt(file_path)
+                
+                # Handle different array shapes
+                if data.ndim == 1:
+                    print(f"Warning: File {file_name} has only 1 row. Skipping entire dataset '{file_label}'.")
+                    return None
+                elif data.ndim == 2 and data.shape[1] >= 2:
+                    data_dict[(x_coord, y_coord, z_coord)] = data[:, 1]
+                else:
+                    print(f"Warning: File {file_name} has unexpected shape {data.shape}. Skipping entire dataset '{file_label}'.")
+                    return None
+            except Exception as e:
+                print(f"Warning: Could not load {file_name}: {e}. Skipping entire dataset '{file_label}'.")
+                return None
+    
     # Check if data_dict is empty
     if not data_dict:
         print(f"No files found in {directory_path} with label {file_label}.")

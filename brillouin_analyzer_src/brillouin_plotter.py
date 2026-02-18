@@ -11,6 +11,7 @@ from .aux_func import convert_to_df_map, extract_peak_values
 from .data_registry import extract_lateral_step_from_container
 from matplotlib.ticker import ScalarFormatter
 from matplotlib.lines import Line2D
+from matplotlib import patheffects
 
 plt.rcParams.update({
     'font.family': 'sans-serif',
@@ -78,10 +79,11 @@ def plot_brillouin_heatmap(
     filter_type=None,
     filter_params=None,
     interpolate_nan=True,
-    colorbar_range=None,
+    colorbar_range=("auto", 60, 99),
     cmap='jet',
     interpolation=None,
     annotate=True,
+    scalebar=False,
     match_type='exact',
     scale=1,
     pixel_aggregation='mean',
@@ -123,6 +125,8 @@ def plot_brillouin_heatmap(
         Interpolation method for imshow.
     annotate : bool, optional
         Whether to annotate the plot with statistical information.
+    scalebar : bool, optional
+        If True, hide axis unit labels and draw a high-contrast scale bar.
     scale : float, optional
         Scaling factor for the axes.
     match_type : str, optional
@@ -276,8 +280,10 @@ def plot_brillouin_heatmap(
     )
     
     plt.title(title, fontsize=20)
-    plt.xlabel("μm", fontsize=20)  # Updated fontsize
-    plt.ylabel("μm", fontsize=20)  # Updated fontsize
+    xlabel = "" if scalebar else "μm"
+    ylabel = "" if scalebar else "μm"
+    plt.xlabel(xlabel, fontsize=20)
+    plt.ylabel(ylabel, fontsize=20)
     # Ticklabels format
     plt.ticklabel_format(style='sci', axis='both', scilimits=(0, 0))
 
@@ -292,17 +298,33 @@ def plot_brillouin_heatmap(
         formatted = f"{value:.2f}".rstrip('0').rstrip('.')
         return formatted
 
+    def _nice_length(length_um):
+        """Round a raw length to a visually pleasing number."""
+        if not np.isfinite(length_um) or length_um <= 0:
+            return 1.0
+        exponent = np.floor(np.log10(length_um))
+        fraction = length_um / (10 ** exponent)
+        if fraction < 1.5:
+            nice_fraction = 1
+        elif fraction < 3:
+            nice_fraction = 2
+        elif fraction < 7:
+            nice_fraction = 5
+        else:
+            nice_fraction = 10
+        return nice_fraction * (10 ** exponent)
+
     x_tick_labels = [_format_tick_label(val) for val in x_ticks]
     y_tick_labels = [_format_tick_label(val) for val in y_ticks]
 
     plt.xticks(
         ticks=np.arange(0, processed_data.shape[1], step=10),
-        labels=x_tick_labels,
+        labels=x_tick_labels if not scalebar else [],
         rotation=45
     )
     plt.yticks(
         ticks=np.arange(0, processed_data.shape[0], step=10),
-        labels=y_tick_labels
+        labels=y_tick_labels if not scalebar else []
     )
     #     # Force scientific notation on both axes
     # formatter = ScalarFormatter(useMathText=True)
@@ -311,12 +333,15 @@ def plot_brillouin_heatmap(
     # plt.gca().yaxis.set_major_formatter(formatter)
 
     # Set tick label fontsize
-    plt.gca().tick_params(axis='both', which='major', labelsize=20)
+    ax = plt.gca()
+    ax.tick_params(axis='both', which='major', labelsize=20)
+    if scalebar:
+        ax.tick_params(axis='both', which='both', length=0)
 
     # Add colorbar with label
     cbar = plt.colorbar(im)
-    # cbar_label = f"{data_type} (GHz)"
-    cbar_label = "GHz"
+    cbar_label = f"Brillouin {data_type} [GHz]"
+    # cbar_label = "GHz"
     cbar.set_label(cbar_label, fontsize=20)  # Updated fontsize
 
     # Set colorbar tick label fontsize
@@ -327,17 +352,66 @@ def plot_brillouin_heatmap(
         mean_val = np.nanmean(data_for_stat)
         median_val = np.nanmedian(data_for_stat)
         std_val = np.nanstd(data_for_stat)
-        plt.text(
+        ax.text(
             0.95,
             0.95,
             f"Mean: {mean_val:.2f}\nMedian: {median_val:.2f}\nStd: {std_val:.2f}",
             verticalalignment='top',
             horizontalalignment='right',
-            transform=plt.gca().transAxes,
+            transform=ax.transAxes,
             color='white',
             fontsize=10,
             bbox=dict(facecolor='black', alpha=0.5, pad=5)
         )
+
+    if scalebar:
+        px_size_um = scale if isinstance(scale, (int, float)) and np.isfinite(scale) and scale > 0 else 1.0
+        data_height, data_width = processed_data.shape
+        bar_pixel_length = max(1, int(data_width * 0.25))
+        raw_length_um = bar_pixel_length * px_size_um
+        nice_length_um = _nice_length(raw_length_um)
+        bar_pixel_length = max(1, int(round(nice_length_um / px_size_um)))
+        bar_height_pixels = max(1, int(data_height * 0.02))
+        margin_x = data_width * 0.05
+        margin_y = data_height * 0.05
+        x0 = data_width - margin_x - bar_pixel_length
+        y0 = margin_y
+        text_offset = bar_height_pixels * 1.5
+        cap_height = max(1, bar_height_pixels * 1.6)
+
+        x_start = x0
+        x_end = x0 + bar_pixel_length
+        main_line = ax.plot(
+            [x_start, x_end],
+            [y0, y0],
+            color='white',
+            linewidth=6,
+            solid_capstyle='butt',
+            zorder=10
+        )[0]
+        main_line.set_path_effects([
+            patheffects.Stroke(linewidth=9, foreground='black'),
+            patheffects.Normal()
+        ])
+
+
+
+        label = f"{_format_tick_label(nice_length_um)} μm"
+        text = ax.text(
+            x0 + bar_pixel_length / 2,
+            y0 + cap_height / 2 + text_offset,
+            label,
+            ha='center',
+            va='bottom',
+            color='white',
+            fontsize=24,
+            fontweight='bold',
+            zorder=11
+        )
+        text.set_path_effects([
+            patheffects.Stroke(linewidth=3, foreground='black'),
+            patheffects.Normal()
+        ])
     if save_path:
         plt.savefig(save_path)
     plt.tight_layout()
@@ -557,6 +631,8 @@ def plot_cell_boxplot(
             return [cmap(0.5)]
         positions = np.linspace(0.15, 0.85, num_items)
         return [cmap(pos) for pos in positions]
+    
+    
 
     def clean_numeric(values):
         """Flatten values and drop NaN/inf so violin styling stays robust."""
@@ -828,7 +904,6 @@ def plot_cell_boxplot(
 # Modified code for showing data points with different colors based on dataset source
     if show_data_points and plot_type != 'errorbar':  # No need for data points in errorbar plot
         # Define a colormap for datasets
-        dataset_cmap = plt.cm.tab10  # Use tab10 colormap for distinct colors
         
         # Track which sample labels have been included in the legend
         sample_labels_in_legend = set()
@@ -862,7 +937,7 @@ def plot_cell_boxplot(
                     x[mask], 
                     data[mask], 
                     alpha=0.7, 
-                    color=dataset_cmap(int(first_idx) % 10),
+                    color='grey',  # grey
                     s=20, 
                     zorder=3,
                     label=entry['label']  # Use the main sample label
@@ -879,7 +954,7 @@ def plot_cell_boxplot(
                             x[1:][remaining_mask],
                             data[1:][remaining_mask],
                             alpha=0.7,
-                            color=dataset_cmap(int(first_idx) % 10),
+                            color='grey',  # grey
                             s=20,
                             zorder=3
                         )
@@ -891,7 +966,7 @@ def plot_cell_boxplot(
                         x[mask], 
                         data[mask], 
                         alpha=0.7, 
-                        color=dataset_cmap(int(idx) % 10),
+                        color='grey',  # grey
                         s=20, 
                         zorder=3
                     )
@@ -903,7 +978,7 @@ def plot_cell_boxplot(
                         x[mask], 
                         data[mask], 
                         alpha=0.7, 
-                        color=dataset_cmap(int(idx) % 10),
+                        color='grey',  # grey
                         s=20, 
                         zorder=3
                     )

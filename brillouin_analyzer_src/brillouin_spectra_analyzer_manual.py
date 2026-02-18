@@ -8,6 +8,7 @@ from tqdm.notebook import tqdm
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from multiprocessing import get_context
 import warnings, os, numbers
+from functools import lru_cache
 from .data_registry import BrillouinPeaksMap, get_lateral_step
 from sklearn.decomposition import PCA
 try:
@@ -15,7 +16,35 @@ try:
 except ImportError:  # Optional dependency for wavelet filtering
     pywt = None
 
+# Try to import numba for JIT compilation of hot functions
+try:
+    from numba import njit
+    NUMBA_AVAILABLE = True
+except ImportError:
+    NUMBA_AVAILABLE = False
+    # Fallback decorator that does nothing
+    def njit(*args, **kwargs):
+        def decorator(func):
+            return func
+        if len(args) == 1 and callable(args[0]):
+            return args[0]
+        return decorator
+
 warnings.filterwarnings("ignore")
+
+# Pre-bind frequently used numpy functions to avoid attribute lookup overhead
+_np_max = np.max
+_np_min = np.min
+_np_abs = np.abs
+_np_sqrt = np.sqrt
+_np_clip = np.clip
+_np_searchsorted = np.searchsorted
+_np_argmax = np.argmax
+_np_argmin = np.argmin
+_np_isfinite = np.isfinite
+_np_nanmedian = np.nanmedian
+_np_nanmin = np.nanmin
+_np_nanmax = np.nanmax
 
 def _process_pixel_common(brillouin_spectra, coords, worker_kwargs, spectrum_data=None):
     x, y, z = coords
@@ -39,9 +68,17 @@ def _process_pixel_with_payload(payload):
 
 
 # ---------- model ----------
+# JIT-compiled Lorentzian for performance when numba is available
+@njit(cache=True, fastmath=True)
+def _lorentzian_core(x, amplitude, center, gamma):
+    """JIT-compiled Lorentzian core computation."""
+    gamma_sq = gamma * gamma
+    return amplitude * gamma_sq / ((x - center)**2 + gamma_sq)
+
+
 def lorentzian(x, amplitude, center, gamma):
     """Plain Lorentzian (no background). FWHM = 2*gamma."""
-    return amplitude * (gamma**2) / ((x - center)**2 + gamma**2)
+    return _lorentzian_core(x, amplitude, center, gamma)
 
 
 # ---------- helpers ----------
@@ -155,29 +192,32 @@ def _apply_filter_sequence(signal, sequence):
     if not sequence:
         return arr
 
+    # Build dispatch dict once (faster than repeated string comparisons)
+    _filter_dispatch = {
+        'savgol': _apply_savgol_filter,
+        'wavelet': _apply_wavelet_filter,
+        'fourier': _apply_fourier_filter,
+        'pca': _apply_pca_filter,
+        'callable': _apply_callable_filter,
+    }
+
     for cfg in sequence:
         filter_type = cfg.get('type')
         if not filter_type:
             continue
-        try:
-            if filter_type == 'savgol':
-                arr = _apply_savgol_filter(arr, cfg)
-            elif filter_type == 'wavelet':
-                arr = _apply_wavelet_filter(arr, cfg)
-            elif filter_type == 'fourier':
-                arr = _apply_fourier_filter(arr, cfg)
-            elif filter_type == 'pca':
-                arr = _apply_pca_filter(arr, cfg)
-            elif filter_type == 'callable':
-                arr = _apply_callable_filter(arr, cfg)
-        except Exception as exc:
-            print(f"Skipping filter '{filter_type}': {exc}")
-    return np.asarray(arr, dtype=float)
+        filter_func = _filter_dispatch.get(filter_type)
+        if filter_func is not None:
+            try:
+                arr = filter_func(arr, cfg)
+            except Exception as exc:
+                print(f"Skipping filter '{filter_type}': {exc}")
+    return arr
 
 
 def _apply_savgol_filter(data, config):
     arr = np.asarray(data, dtype=float)
-    if arr.size < 3:
+    arr_size = arr.size
+    if arr_size < 3:
         return arr
 
     params = config.get('params')
@@ -193,12 +233,13 @@ def _apply_savgol_filter(data, config):
     wl = max(3, int(window_length))
     if wl % 2 == 0:
         wl += 1
-    wl = min(wl, arr.size - (1 - arr.size % 2))
-    if wl <= int(polyorder) or wl < 3:
+    wl = min(wl, arr_size - (1 - arr_size % 2))
+    poly = int(polyorder)
+    if wl <= poly or wl < 3:
         return arr
 
     extra_kwargs = {k: config[k] for k in ('deriv', 'delta', 'axis', 'mode', 'cval') if k in config}
-    return _savgol(arr, wl, int(polyorder), **extra_kwargs)
+    return _savgol(arr, wl, poly, **extra_kwargs)
 
 
 def _apply_wavelet_filter(data, config):
@@ -378,26 +419,11 @@ def analyze_brillouin_spectrum_manual(
     fwhm_bounds_GHz=(0.8, 4.0),     # (min_fwhm, max_fwhm) or None
     center_slack_GHz=0.5,    # ± slack around nominal center; if None, window-bound
     spectrum_data=None,
-    baseline_spectra=False,
+    baseline_spectra=True,
     poisson_weighting=False,
     match_brilouin_parameters=True,
     ignore_brilouin_peaks=False,
-    plot_PCA=False,
-    pca_n_components=2,
-    pca_params={
-        'svd_solver': 'full',
-        'whiten': True,
-        'tol': 0.0,
-        'iterated_power': 5,
-        'random_state': None,
-        'copy': True,
-        },
-    pca_peak_finding_params={
-        'height': 0.02,  # Minimum height of peaks
-        'distance': 100,  # Minimum horizontal distance between peaks
-        'prominence': 0, # Minimum prominence of peaks
-        'width': 2, # Minimum width of peaks
-    },
+    ignore_laser_peaks=False,
 ):
     """
     Analyze a single spectrum at (x,y,z).
@@ -409,6 +435,12 @@ def analyze_brillouin_spectrum_manual(
     - filter_settings accepts an ordered collection (list/tuple) of filter configuration dictionaries.
       Available filter types: 'savgol', 'wavelet', 'fourier', 'pca', and 'callable'. Each entry may
       set apply_after_cut=True to defer filtering until after spectrum_cut_range is applied.
+    - ignore_laser_peaks: Can be a bool (backward compatible) or a dict with two keys:
+      - 'brillouin_shift_average' (bool): If True, Brillouin shift is calculated as
+        (center_right - center_left) / 2 (distance between Brillouin peaks divided by two).
+      - 'ignore_laser_for_fit' (bool): If True, the FSR quadratic fit uses midpoints between
+        Brillouin peak pairs instead of laser peak positions.
+      If a single bool is provided, it's treated as {'brillouin_shift_average': value, 'ignore_laser_for_fit': False}.
     """
 
     baseline_spectra = bool(baseline_spectra)
@@ -438,18 +470,6 @@ def analyze_brillouin_spectrum_manual(
             return None
 
     pre_filter_sequence, post_filter_sequence = _prepare_filter_sequences(filter_settings)
-
-    if plot_PCA:
-        if brillouin_spectra is not None:
-            _perform_and_plot_pca(
-                brillouin_spectra,
-                n_components=pca_n_components,
-                pca_params=pca_params,
-                peak_finding_params=pca_peak_finding_params,
-                cut_range=spectrum_cut_range
-            )
-        else:
-            print("Cannot perform PCA: 'brillouin_spectra' is None.")
 
     if pre_filter_sequence:
         spectrum = _apply_filter_sequence(spectrum, pre_filter_sequence)
@@ -526,7 +546,20 @@ def analyze_brillouin_spectrum_manual(
     # ---------------- Brillouin peak detection ----------------
     match_brilouin_parameters = bool(match_brilouin_parameters)
     ignore_brilouin_peaks = bool(ignore_brilouin_peaks)
+    
+    # Parse ignore_laser_peaks: can be bool or dict with 'brillouin_shift_average' and 'ignore_laser_for_fit'
+    if isinstance(ignore_laser_peaks, dict):
+        brillouin_shift_average = bool(ignore_laser_peaks.get('brillouin_shift_average', False))
+        ignore_laser_for_fit = bool(ignore_laser_peaks.get('ignore_laser_for_fit', False))
+    else:
+        # Backward compatibility: single bool means brillouin_shift_average only
+        brillouin_shift_average = bool(ignore_laser_peaks)
+        ignore_laser_for_fit = False
+    
     if ignore_brilouin_peaks:
+        match_brilouin_parameters = False
+    # When using brillouin_shift_average, disable the shared-shift constraint
+    if brillouin_shift_average:
         match_brilouin_parameters = False
 
     tuple_mode = isinstance(brillouin_peak_ranges, tuple) and len(brillouin_peak_ranges) == 2
@@ -582,7 +615,19 @@ def analyze_brillouin_spectrum_manual(
     init = [1e-16, 1e-16, 0.0]
     lb   = [1e-16, 1e-16, -np.inf]
     ub   = [np.inf, np.inf,  np.inf]
-    res = least_squares(_resid, x0=init, args=(laser_peaks_indices, expected_positions), bounds=(lb, ub))
+    
+    # Determine which indices to use for FSR fit
+    if ignore_laser_for_fit and not tuple_mode and len(brillouin_peaks_indices) == 2 * N_l:
+        # Non-tuple mode with ignore_laser_for_fit: use midpoints between Brillouin peaks
+        fit_indices = np.array([
+            (brillouin_peaks_indices[2*i] + brillouin_peaks_indices[2*i + 1]) / 2.0
+            for i in range(N_l)
+        ])
+    else:
+        # Default: use laser peak indices (tuple mode will refit later if ignore_laser_for_fit)
+        fit_indices = laser_peaks_indices
+    
+    res = least_squares(_resid, x0=init, args=(fit_indices, expected_positions), bounds=(lb, ub))
     if not res.success:
         print("Quadratic fit unsuccessful.")
         return None
@@ -604,27 +649,30 @@ def analyze_brillouin_spectrum_manual(
             lg0, lg1 = lp_pos - b_val, lp_pos - a_val
             rg0, rg1 = lp_pos + a_val, lp_pos + b_val
 
-            sl = np.searchsorted(rescaled_x_axis, min(lg0, lg1))
-            el = np.searchsorted(rescaled_x_axis, max(lg0, lg1))
-            sr = np.searchsorted(rescaled_x_axis, min(rg0, rg1))
-            er = np.searchsorted(rescaled_x_axis, max(rg0, rg1))
+            sl = _np_searchsorted(rescaled_x_axis, min(lg0, lg1))
+            el = _np_searchsorted(rescaled_x_axis, max(lg0, lg1))
+            sr = _np_searchsorted(rescaled_x_axis, min(rg0, rg1))
+            er = _np_searchsorted(rescaled_x_axis, max(rg0, rg1))
 
-            sl, el = max(0, sl), min(len(spectrum), el)
-            sr, er = max(0, sr), min(len(spectrum), er)
+            n_spec = len(spectrum)
+            sl, el = max(0, sl), min(n_spec, el)
+            sr, er = max(0, sr), min(n_spec, er)
 
             if ignore_brilouin_peaks:
                 left_center_freq = float((lg0 + lg1) * 0.5)
                 right_center_freq = float((rg0 + rg1) * 0.5)
-                il = int(np.argmin(np.abs(rescaled_x_axis - left_center_freq))) if len(rescaled_x_axis) else None
-                ir = int(np.argmin(np.abs(rescaled_x_axis - right_center_freq))) if len(rescaled_x_axis) else None
+                il = int(_np_argmin(_np_abs(rescaled_x_axis - left_center_freq))) if len(rescaled_x_axis) else None
+                ir = int(_np_argmin(_np_abs(rescaled_x_axis - right_center_freq))) if len(rescaled_x_axis) else None
             else:
                 il = ir = None
                 if el - sl > 0:
-                    pk, _ = find_peaks(spectrum[sl:el], height=0)
-                    il = int(pk[np.argmax(peak_prominences(spectrum[sl:el], pk)[0])] + sl) if len(pk) else int(np.argmax(spectrum[sl:el]) + sl)
+                    seg_left = spectrum[sl:el]
+                    pk, _ = find_peaks(seg_left, height=0)
+                    il = int(pk[_np_argmax(peak_prominences(seg_left, pk)[0])] + sl) if len(pk) else int(_np_argmax(seg_left) + sl)
                 if er - sr > 0:
-                    pk, _ = find_peaks(spectrum[sr:er], height=0)
-                    ir = int(pk[np.argmax(peak_prominences(spectrum[sr:er], pk)[0])] + sr) if len(pk) else int(np.argmax(spectrum[sr:er]) + sr)
+                    seg_right = spectrum[sr:er]
+                    pk, _ = find_peaks(seg_right, height=0)
+                    ir = int(pk[_np_argmax(peak_prominences(seg_right, pk)[0])] + sr) if len(pk) else int(_np_argmax(seg_right) + sr)
 
             if il is not None and ir is not None:
                 keep_lp.append(lp)
@@ -642,6 +690,19 @@ def analyze_brillouin_spectrum_manual(
         if len(brillouin_peaks_indices) != 2 * len(laser_peaks_indices):
             print("Mismatch in Brillouin peaks count with tuple mode (after filtering).")
             return None
+        
+        # In tuple mode with ignore_laser_for_fit: redo FSR fit using Brillouin peak midpoints
+        if ignore_laser_for_fit and len(brillouin_peaks_indices) == 2 * len(laser_peaks_indices):
+            n_pairs = len(laser_peaks_indices)
+            midpoint_indices = np.array([
+                (brillouin_peaks_indices[2*i] + brillouin_peaks_indices[2*i + 1]) / 2.0
+                for i in range(n_pairs)
+            ])
+            expected_positions_refit = np.arange(n_pairs) * free_spectral_range
+            res_refit = least_squares(_resid, x0=[a, b, c], args=(midpoint_indices, expected_positions_refit), bounds=(lb, ub))
+            if res_refit.success:
+                a, b, c = [float(v) for v in res_refit.x]
+                rescaled_x_axis = a * x_axis**2 + b * x_axis + c  # Update rescaled axis
 
     left_center_bounds = []
     right_center_bounds = []
@@ -729,39 +790,45 @@ def analyze_brillouin_spectrum_manual(
         fmin, fmax = fwhm_bounds_GHz
         g_lo = max(1e-6, 0.5 * float(fmin)) if (fmin is not None) else 1e-6
         g_hi = (0.5 * float(fmax)) if (fmax is not None) else np.inf
-        if not np.isfinite(g_hi) or g_hi <= g_lo:
+        if not _np_isfinite(g_hi) or g_hi <= g_lo:
             g_hi = np.inf
     else:
         g_lo, g_hi = 1e-6, np.inf
+
+    # Pre-compute values used repeatedly in _fit_one_by_center
+    _spectrum_len = len(spectrum)
+    _axis_len = len(rescaled_x_axis)
+    # Cache the median gradient for fallback (computed once, not per peak)
+    _cached_median_gradient = float(np.median(np.gradient(rescaled_x_axis))) if _axis_len > 1 else 1.0
 
     # helper: fit one Lorentzian around a nominal center using GHz window & constraints
     def _fit_one_by_center(nominal_idx, *, hard_center_bounds=None, return_window=False):
         xc_nom = float(rescaled_x_axis[nominal_idx])
         lo_val = xc_nom - fit_half_window_GHz
         hi_val = xc_nom + fit_half_window_GHz
-        w0 = np.searchsorted(rescaled_x_axis, lo_val, side='left')
-        w1 = np.searchsorted(rescaled_x_axis, hi_val, side='right')
-        w0 = max(0, w0); w1 = min(len(spectrum), max(w1, w0 + 3))  # >= 3 pts
+        w0 = _np_searchsorted(rescaled_x_axis, lo_val, side='left')
+        w1 = _np_searchsorted(rescaled_x_axis, hi_val, side='right')
+        w0 = max(0, w0); w1 = min(_spectrum_len, max(w1, w0 + 3))  # >= 3 pts
 
         xw = rescaled_x_axis[w0:w1].copy()
         yw = spectrum[w0:w1].copy()
         if len(xw) < 3:
             w0 = max(0, nominal_idx - 3)
-            w1 = min(len(spectrum), nominal_idx + 4)
+            w1 = min(_spectrum_len, nominal_idx + 4)
             xw = rescaled_x_axis[w0:w1].copy()
             yw = spectrum[w0:w1].copy()
 
-        A0 = float(max(1e-12, np.max(yw)))
-        x0 = float(xw[np.argmax(yw)])
+        A0 = float(max(1e-12, _np_max(yw)))
+        x0 = float(xw[_np_argmax(yw)])
         try:
             w_samples = float(peak_widths(spectrum, [nominal_idx], rel_height=0.5)[0][0])
         except Exception:
             w_samples = max(1.0, len(xw) / 5.0)
-        seg_hi = min(len(rescaled_x_axis)-1, w0 + max(2, len(xw)))
+        seg_hi = min(_axis_len - 1, w0 + max(2, len(xw)))
         local_dx = np.median(np.diff(rescaled_x_axis[max(0, w0):seg_hi]))
-        local_dx = float(local_dx) if np.isfinite(local_dx) and local_dx != 0 else float(np.median(np.gradient(rescaled_x_axis)))
+        local_dx = float(local_dx) if (_np_isfinite(local_dx) and local_dx != 0) else _cached_median_gradient
         fwhm0 = max(1e-6, w_samples * abs(local_dx))
-        g0 = float(np.clip(0.5 * fwhm0, g_lo, g_hi if np.isfinite(g_hi) else 0.5 * fwhm0))
+        g0 = float(_np_clip(0.5 * fwhm0, g_lo, g_hi if _np_isfinite(g_hi) else 0.5 * fwhm0))
         hard_lo = hard_hi = None
         if hard_center_bounds is not None:
             hard_lo, hard_hi = hard_center_bounds
@@ -781,26 +848,26 @@ def analyze_brillouin_spectrum_manual(
         if c_lo_val > c_hi_val:
             mid_val = 0.5 * (c_lo_val + c_hi_val)
             c_lo_val = c_hi_val = mid_val
-        c_lo = max(min(xw), c_lo_val)
-        c_hi = min(max(xw), c_hi_val)
+        xw_min, xw_max = float(xw[0]), float(xw[-1])  # xw is already sorted
+        c_lo = max(xw_min, c_lo_val)
+        c_hi = min(xw_max, c_hi_val)
         if c_hi < c_lo:
-            target = float(np.clip(x0, min(c_lo_val, c_hi_val), max(c_lo_val, c_hi_val)))
+            target = float(_np_clip(x0, min(c_lo_val, c_hi_val), max(c_lo_val, c_hi_val)))
             c_lo = c_hi = target
         p0 = [A0, x0, g0]
         bounds = ([0.0, c_lo, g_lo], [np.inf, c_hi, g_hi])
-        fit_func = lorentzian
 
         sigma = None
         if poisson_weighting:
-            sigma = np.sqrt(np.clip(yw, 1e-6, None))
+            sigma = _np_sqrt(_np_clip(yw, 1e-6, None))
 
         try:
             if poisson_weighting and sigma is not None:
-                popt, _ = curve_fit(fit_func, xw, yw, p0=p0, bounds=bounds, sigma=sigma,
+                popt, _ = curve_fit(lorentzian, xw, yw, p0=p0, bounds=bounds, sigma=sigma,
                                     absolute_sigma=False, maxfev=20000)
             else:
-                popt, _ = curve_fit(fit_func, xw, yw, p0=p0, bounds=bounds, maxfev=20000)
-            A, xc, g = [float(popt[0]), float(popt[1]), float(popt[2])]
+                popt, _ = curve_fit(lorentzian, xw, yw, p0=p0, bounds=bounds, maxfev=20000)
+            A, xc, g = float(popt[0]), float(popt[1]), float(popt[2])
         except Exception:
             A, xc, g = p0
 
@@ -809,9 +876,9 @@ def analyze_brillouin_spectrum_manual(
             try:
                 model_vals = lorentzian(xw, A, xc, g)
                 diff = model_vals - yw
-                rmse = float(np.sqrt(np.mean(diff**2))) if diff.size else np.nan
+                rmse = float(_np_sqrt(np.mean(diff**2))) if diff.size else np.nan
             except Exception:
-                rmse = np.nan
+                pass
 
         if return_window:
             return A, xc, g, rmse, xw, yw, sigma
@@ -821,31 +888,36 @@ def analyze_brillouin_spectrum_manual(
         if not windows:
             return None
         n = len(windows)
-        shift_inits = []
-        gamma_inits = []
-        amp_inits = []
-        for win in windows:
-            if side == 'left':
+        
+        # Pre-allocate arrays instead of list appends
+        shift_inits = np.empty(n, dtype=float)
+        gamma_inits = np.empty(n, dtype=float)
+        amp_inits = np.empty(n, dtype=float)
+        
+        # Pre-extract window data for faster access in residual function
+        is_left = (side == 'left')
+        laser_centers = np.empty(n, dtype=float)
+        window_lengths = np.empty(n, dtype=int)
+        
+        for i, win in enumerate(windows):
+            laser_centers[i] = win['laser_center']
+            window_lengths[i] = len(win['x'])
+            
+            if is_left:
                 shift_val = float(win['laser_center'] - win['center_init'])
             else:
                 shift_val = float(win['center_init'] - win['laser_center'])
             shift_val = abs(shift_val)
-            if not np.isfinite(shift_val) or shift_val <= 0:
-                shift_val = 1.0
-            shift_inits.append(shift_val)
+            shift_inits[i] = shift_val if (_np_isfinite(shift_val) and shift_val > 0) else 1.0
+            
             gamma_val = float(win['gamma_init'])
-            if not np.isfinite(gamma_val) or gamma_val <= 0:
-                gamma_val = 1.0
-            gamma_inits.append(gamma_val)
+            gamma_inits[i] = gamma_val if (_np_isfinite(gamma_val) and gamma_val > 0) else 1.0
+            
             amp_val = float(win['amplitude_init'])
-            if not np.isfinite(amp_val) or amp_val < 0:
-                amp_val = 1.0
-            amp_inits.append(amp_val)
+            amp_inits[i] = amp_val if (_np_isfinite(amp_val) and amp_val >= 0) else 1.0
 
-        shift0 = float(np.mean(shift_inits)) if shift_inits else 1.0
-        shift0 = max(1e-6, shift0)
-        gamma0 = float(np.mean(gamma_inits)) if gamma_inits else 1.0
-        gamma0 = float(np.clip(gamma0, g_lo, g_hi if np.isfinite(g_hi) else gamma0))
+        shift0 = max(1e-6, float(np.mean(shift_inits)))
+        gamma0 = float(_np_clip(np.mean(gamma_inits), g_lo, g_hi if _np_isfinite(g_hi) else np.mean(gamma_inits)))
         params0 = np.concatenate([[shift0, gamma0], amp_inits])
 
         shift_lower_bound = 1e-6
@@ -853,55 +925,70 @@ def analyze_brillouin_spectrum_manual(
         shift_lower_candidates = []
         shift_upper_candidates = []
         bounds_available = True
-        for win in windows:
+        for i, win in enumerate(windows):
             center_bounds = win.get('center_bounds')
             if center_bounds is None:
                 bounds_available = False
                 break
             c_lo, c_hi = center_bounds
-            if not (np.isfinite(c_lo) and np.isfinite(c_hi)):
+            if not (_np_isfinite(c_lo) and _np_isfinite(c_hi)):
                 bounds_available = False
                 break
-            if side == 'left':
-                lower_val = max(1e-6, win['laser_center'] - c_hi)
-                upper_val = max(1e-6, win['laser_center'] - c_lo)
+            lc = laser_centers[i]
+            if is_left:
+                lower_val = max(1e-6, lc - c_hi)
+                upper_val = max(1e-6, lc - c_lo)
             else:
-                lower_val = max(1e-6, c_lo - win['laser_center'])
-                upper_val = max(1e-6, c_hi - win['laser_center'])
+                lower_val = max(1e-6, c_lo - lc)
+                upper_val = max(1e-6, c_hi - lc)
             shift_lower_candidates.append(lower_val)
             shift_upper_candidates.append(upper_val)
         if bounds_available and shift_lower_candidates and shift_upper_candidates:
             shift_lower_bound = max([1e-6] + shift_lower_candidates)
             shift_upper_bound = min([np.inf] + shift_upper_candidates)
             if shift_lower_bound > shift_upper_bound:
-                mid = float(np.mean(shift_inits)) if shift_inits else shift_lower_bound
-                shift_lower_bound = shift_upper_bound = max(1e-6, mid)
+                mid = max(1e-6, float(np.mean(shift_inits)))
+                shift_lower_bound = shift_upper_bound = mid
 
-        params0[0] = float(np.clip(params0[0], shift_lower_bound, shift_upper_bound))
+        params0[0] = float(_np_clip(params0[0], shift_lower_bound, shift_upper_bound))
 
         lower_bounds = np.array([shift_lower_bound, g_lo] + [0.0] * n, dtype=float)
-        upper_gamma = g_hi if np.isfinite(g_hi) else np.inf
+        upper_gamma = g_hi if _np_isfinite(g_hi) else np.inf
         upper_bounds = np.array([shift_upper_bound, upper_gamma] + [np.inf] * n, dtype=float)
 
+        # Pre-allocate residual output array and pre-compute sigma if needed
+        total_points = int(np.sum(window_lengths))
+        residual_out = np.empty(total_points, dtype=float)
+        
+        # Pre-compute sigma arrays for Poisson weighting
+        if poisson_weighting:
+            sigma_arrays = []
+            for win in windows:
+                sig = win.get('sigma')
+                if sig is None:
+                    sig = _np_sqrt(_np_clip(win['y'], 1e-6, None))
+                sigma_arrays.append(_np_clip(sig, 1e-6, None))
+        else:
+            sigma_arrays = None
+
         def _residuals(params):
-            shift = float(params[0])
-            gamma = float(params[1])
+            shift = params[0]
+            gamma = params[1]
             amps = params[2:]
-            residual_chunks = []
-            for amp, win in zip(amps, windows):
-                if side == 'left':
-                    center_val = win['laser_center'] - shift
+            offset = 0
+            for i, (amp, win) in enumerate(zip(amps, windows)):
+                length = window_lengths[i]
+                if is_left:
+                    center_val = laser_centers[i] - shift
                 else:
-                    center_val = win['laser_center'] + shift
+                    center_val = laser_centers[i] + shift
                 model = lorentzian(win['x'], amp, center_val, gamma)
                 resid = model - win['y']
                 if poisson_weighting:
-                    sigma_local = win.get('sigma')
-                    if sigma_local is None:
-                        sigma_local = np.sqrt(np.clip(win['y'], 1e-6, None))
-                    resid = resid / np.clip(sigma_local, 1e-6, None)
-                residual_chunks.append(resid)
-            return np.concatenate(residual_chunks)
+                    resid = resid / sigma_arrays[i]
+                residual_out[offset:offset + length] = resid
+                offset += length
+            return residual_out
 
         try:
             res = least_squares(_residuals, params0, bounds=(lower_bounds, upper_bounds), max_nfev=20000)
@@ -914,27 +1001,27 @@ def analyze_brillouin_spectrum_manual(
         shift_opt = float(opt[0])
         gamma_opt = float(opt[1])
         amps_opt = [float(v) for v in opt[2:]]
-        centers_opt = []
-        for win in windows:
-            if side == 'left':
-                center_val = win['laser_center'] - shift_opt
-            else:
-                center_val = win['laser_center'] + shift_opt
-            centers_opt.append(float(center_val))
+        
+        # Vectorized center computation
+        if is_left:
+            centers_opt = (laser_centers - shift_opt).tolist()
+        else:
+            centers_opt = (laser_centers + shift_opt).tolist()
+        
+        # Compute RMSE list
         rmse_list = []
         for amp_val, center_val, win in zip(amps_opt, centers_opt, windows):
             rmse_val = np.nan
             try:
                 x_vals = win.get('x')
                 y_vals = win.get('y')
-                if x_vals is not None and y_vals is not None:
-                    if len(x_vals) and len(y_vals):
-                        model_vals = lorentzian(x_vals, amp_val, center_val, gamma_opt)
-                        diff = model_vals - y_vals
-                        if diff.size:
-                            rmse_val = float(np.sqrt(np.mean(diff**2)))
+                if x_vals is not None and y_vals is not None and len(x_vals) and len(y_vals):
+                    model_vals = lorentzian(x_vals, amp_val, center_val, gamma_opt)
+                    diff = model_vals - y_vals
+                    if diff.size:
+                        rmse_val = float(_np_sqrt(np.mean(diff**2)))
             except Exception:
-                rmse_val = np.nan
+                pass
             rmse_list.append(rmse_val)
 
         return {
@@ -1021,9 +1108,16 @@ def analyze_brillouin_spectrum_manual(
                         'center_bounds': right_bounds_current,
                     })
 
-            left_shifts.append(center_laser_list[-1] - center_left_list[-1])
-            right_shifts.append(center_right_list[-1] - center_laser_list[-1])
-            shifts.append((center_right_list[-1] - center_left_list[-1]) / 2.0)
+            brillouin_based_shift = (center_right_list[-1] - center_left_list[-1]) / 2.0
+            if brillouin_shift_average:
+                # Shift determined purely from Brillouin peak positions
+                left_shifts.append(brillouin_based_shift)
+                right_shifts.append(brillouin_based_shift)
+            else:
+                # Shift measured from laser peak position
+                left_shifts.append(center_laser_list[-1] - center_left_list[-1])
+                right_shifts.append(center_right_list[-1] - center_laser_list[-1])
+            shifts.append(brillouin_based_shift)
             fwhms_left = 2.0 * gamma_left_list[-1]
             fwhms_right = 2.0 * gamma_right_list[-1]
             fwhms_left_list.append(fwhms_left)
@@ -1033,9 +1127,14 @@ def analyze_brillouin_spectrum_manual(
             left_center = float(rescaled_x_axis[li])
             right_center = float(rescaled_x_axis[ri])
             laser_center = float(rescaled_x_axis[lp])
-            left_shifts.append(laser_center - left_center)
-            right_shifts.append(right_center - laser_center)
-            shifts.append((right_center - left_center) / 2.0)
+            bbs = (right_center - left_center) / 2.0
+            if brillouin_shift_average:
+                left_shifts.append(bbs)
+                right_shifts.append(bbs)
+            else:
+                left_shifts.append(laser_center - left_center)
+                right_shifts.append(right_center - laser_center)
+            shifts.append(bbs)
 
             if ignore_brilouin_peaks:
                 fwhms_left_list.append(1.0)
@@ -1251,6 +1350,9 @@ def analyze_brillouin_spectrum_manual(
         'poisson_weighting': poisson_weighting,
         'match_brilouin_parameters': match_brilouin_parameters,
         'ignore_brilouin_peaks': ignore_brilouin_peaks,
+        'ignore_laser_peaks': ignore_laser_peaks,
+        'brillouin_shift_average': brillouin_shift_average,
+        'ignore_laser_for_fit': ignore_laser_for_fit,
         'fit_laser_lorentzians': fit_laser_lorentzians,
         'start_index': s0,
     }
@@ -1322,49 +1424,191 @@ def _prepare_spectra_matrix(brillouin_spectra, cut_range=None, baseline_spectra=
     return matrix, (s0 if cut_range else 0)
 
 
-def _perform_and_plot_pca(brillouin_spectra, n_components=3, pca_params=None, peak_finding_params=None, cut_range=None):
+def perform_pca_analysis(
+    brillouin_spectra,
+    n_components=3,
+    pca_params=None,
+    peak_finding_params=None,
+    peak_windows=None,
+    spectrum_cut_range=None,
+    baseline_spectra=False,
+    figsize=(12, None),
+    show_plot=True,
+):
+    """
+    Perform PCA analysis on Brillouin spectra and optionally plot the results.
+    
+    Parameters
+    ----------
+    brillouin_spectra : array-like
+        3D array of Brillouin spectra (x, y, z, spectrum).
+    n_components : int, default=3
+        Number of PCA components to compute.
+    pca_params : dict, optional
+        Additional parameters passed to sklearn.decomposition.PCA.
+    peak_finding_params : dict, optional
+        Parameters passed to scipy.signal.find_peaks for global peak detection.
+        Used when peak_windows is None.
+    peak_windows : list of tuples, optional
+        List of (start, end) index ranges for window-based peak finding.
+        Each window will detect exactly one peak (the maximum within that window).
+        When provided, this takes precedence over peak_finding_params.
+        Example: [(400, 500), (600, 700), (900, 1000), (1100, 1200)]
+    spectrum_cut_range : tuple, optional
+        (start, end) indices to cut spectra before analysis.
+    baseline_spectra : bool, default=False
+        Whether to baseline (subtract minimum) each spectrum.
+    figsize : tuple, default=(12, None)
+        Figure size. If second element is None, height is calculated as 4 * n_components.
+    show_plot : bool, default=True
+        Whether to display the plot.
+    
+    Returns
+    -------
+    dict
+        Dictionary containing:
+        - 'pca_model': fitted PCA model
+        - 'components': PCA components array
+        - 'explained_variance_ratio': variance explained by each component
+        - 'peaks_per_component': list of detected peak indices for each component
+        - 'x_axis': x-axis values (indices) for plotting
+        - 'x_offset': offset applied to indices
+    """
     if pca_params is None:
         pca_params = {}
     if peak_finding_params is None:
         peak_finding_params = {}
 
-    matrix, x_offset = _prepare_spectra_matrix(brillouin_spectra, cut_range=cut_range, baseline_spectra=False)
+    matrix, x_offset = _prepare_spectra_matrix(
+        brillouin_spectra, 
+        cut_range=spectrum_cut_range, 
+        baseline_spectra=baseline_spectra
+    )
     if matrix is None:
         print("No valid spectra found for PCA.")
-        return
+        return None
 
     pca = PCA(n_components=n_components, **pca_params)
     try:
         pca.fit(matrix)
     except Exception as e:
         print(f"PCA failed: {e}")
-        return
+        return None
 
     components = pca.components_
-
-    fig, axes = plt.subplots(n_components, 1, figsize=(12, 4 * n_components), sharex=True)
-    if n_components == 1:
-        axes = [axes]
-
     x_axis = np.arange(matrix.shape[1]) + x_offset
+    
+    # Find peaks for each component
+    peaks_per_component = []
+    for comp in components:
+        if peak_windows is not None:
+            # Window-based peak finding: one peak per window
+            peaks = _find_peaks_in_windows(comp, peak_windows, x_offset, **peak_finding_params)
+        else:
+            # Global peak finding using find_peaks
+            peaks, _ = find_peaks(comp, **peak_finding_params)
+        peaks_per_component.append(peaks)
 
-    for i, ax in enumerate(axes):
-        comp = components[i]
-        ax.plot(x_axis, comp, label=f"Component {i+1}")
-        ax.set_ylabel("Amplitude")
-        ax.legend(loc='upper right')
+    # Plotting
+    if show_plot:
+        fig_height = figsize[1] if figsize[1] is not None else 4 * n_components
+        fig, axes = plt.subplots(n_components, 1, figsize=(figsize[0], fig_height), sharex=True)
+        if n_components == 1:
+            axes = [axes]
 
-        peaks, _ = find_peaks(comp, **peak_finding_params)
+        for i, ax in enumerate(axes):
+            comp = components[i]
+            ax.plot(x_axis, comp, label=f"Component {i+1}")
+            ax.set_ylabel("Amplitude")
+            ax.legend(loc='upper right')
 
-        if len(peaks) > 0:
-            ax.plot(x_axis[peaks], comp[peaks], "x", color='red')
-            for p in peaks:
-                ax.text(x_axis[p], comp[p], f"{int(x_axis[p])}", verticalalignment='bottom', color='red')
+            peaks = peaks_per_component[i]
+            if len(peaks) > 0:
+                ax.plot(x_axis[peaks], comp[peaks], "x", color='red', markersize=10)
+                for p in peaks:
+                    ax.text(x_axis[p], comp[p], f"{int(x_axis[p])}", 
+                           verticalalignment='bottom', color='red', fontsize=9)
+            
+            # Show windows if provided
+            if peak_windows is not None:
+                for start, end in peak_windows:
+                    # Adjust window indices relative to cut range
+                    local_start = max(0, start - x_offset)
+                    local_end = min(len(comp), end - x_offset)
+                    if local_end > local_start:
+                        ax.axvspan(start, end, color='yellow', alpha=0.15)
 
-    axes[-1].set_xlabel("Index")
-    plt.suptitle(f"PCA Analysis ({n_components} components)")
-    plt.tight_layout()
-    plt.show()
+        axes[-1].set_xlabel("Index")
+        plt.suptitle(f"PCA Analysis ({n_components} components)")
+        plt.tight_layout()
+        plt.show()
+
+    peaks_per_component_with_offset = [
+        np.asarray(peaks) + x_offset if isinstance(peaks, (np.ndarray, list)) else peaks
+        for peaks in peaks_per_component
+    ]
+    return {
+        'pca_model': pca,
+        'components': components,
+        'explained_variance_ratio': pca.explained_variance_ratio_,
+        'peaks_per_component': peaks_per_component,
+        'peaks_per_component_with_offset': peaks_per_component_with_offset,
+        'x_axis': x_axis,
+        'x_offset': x_offset,
+    }
+
+
+def _find_peaks_in_windows(signal, windows, offset=0, **peak_finding_params):
+    """
+    Find one peak per window in the signal using scipy.signal.find_peaks.
+    
+    Parameters
+    ----------
+    signal : array-like
+        1D signal array.
+    windows : list of tuples
+        List of (start, end) index ranges (in original coordinates before cut).
+    offset : int
+        Offset to convert from original indices to local signal indices.
+    **peak_finding_params
+        Additional parameters passed to scipy.signal.find_peaks.
+    
+    Returns
+    -------
+    list
+        List of peak indices (in local signal coordinates).
+    """
+    peaks = []
+    signal = np.asarray(signal)
+    n = len(signal)
+    
+    for start, end in windows:
+        # Convert to local indices
+        local_start = max(0, int(start - offset))
+        local_end = min(n, int(end - offset))
+        
+        if local_end <= local_start:
+            continue
+        
+        # Extract window signal
+        window_signal = signal[local_start:local_end]
+        
+        # Find peaks within this window using scipy
+        window_peaks, _ = find_peaks(window_signal, **peak_finding_params)
+        
+        if len(window_peaks) == 0:
+            # If no peaks found, fall back to maximum
+            local_max_idx = np.argmax(window_signal)
+            peak_idx = local_start + local_max_idx
+        else:
+            # Select the peak with the highest amplitude
+            peak_heights = window_signal[window_peaks]
+            tallest_peak_local_idx = window_peaks[np.argmax(peak_heights)]
+            peak_idx = local_start + tallest_peak_local_idx
+        
+        peaks.append(peak_idx)
+    
+    return peaks
 
 
 def pca_spectra_filter(
@@ -1717,12 +1961,12 @@ def annotate_distances(
         plt.annotate('', xy=(lp_pos, arrow_y), xytext=(bp_pos_left, arrow_y),
                      arrowprops=dict(arrowstyle='<->', color='red', lw=1.5))
         mid_x_left = (lp_pos + bp_pos_left) / 2
-        plt.text(mid_x_left, arrow_y, f"{distance_left:.2f} GHz", color='red', ha='center', va='bottom', fontsize=9)
+        plt.text(mid_x_left, arrow_y, f"{distance_left:.2f} GHz", color='red', ha='center', va='bottom', fontsize=8)
 
         plt.annotate('', xy=(lp_pos, arrow_y), xytext=(bp_pos_right, arrow_y),
                      arrowprops=dict(arrowstyle='<->', color='red', lw=1.5))
         mid_x_right = (lp_pos + bp_pos_right) / 2
-        plt.text(mid_x_right, arrow_y, f"{distance_right:.2f} GHz", color='red', ha='center', va='bottom', fontsize=9)
+        plt.text(mid_x_right, arrow_y, f"{distance_right:.2f} GHz", color='red', ha='center', va='bottom', fontsize=8)
 
     if len(laser_positions) > 1:
         for i in range(len(laser_positions) - 1):
@@ -1730,16 +1974,16 @@ def annotate_distances(
             distance = x2 - x1
             plt.annotate('', xy=(x1, 0), xytext=(x2, 0), arrowprops=dict(arrowstyle='<->', color='green', lw=1.5))
             mid_x = (x1 + x2) / 2; mid_y = -max_spectrum * 0.03
-            plt.text(mid_x, mid_y, f"{distance:.2f} GHz", color='green', ha='center', va='bottom', fontsize=9)
+            plt.text(mid_x, mid_y, f"{distance:.2f} GHz", color='green', ha='center', va='bottom', fontsize=8)
 
 
 def plot_vertical_lines(laser_positions, left_brillouin_positions, right_brillouin_positions):
     for lp_pos in laser_positions:
-        plt.axvline(x=lp_pos, color='green', linestyle='--', linewidth=1.5)
+        plt.axvline(x=lp_pos, color='green', linestyle='--', linewidth=1.5, alpha=0.2)
     for bp_pos in left_brillouin_positions:
-        plt.axvline(x=bp_pos, color='red', linestyle='--', linewidth=1.5)
+        plt.axvline(x=bp_pos, color='red', linestyle='--', linewidth=1.5, alpha=0.2)
     for bp_pos in right_brillouin_positions:
-        plt.axvline(x=bp_pos, color='red', linestyle='--', linewidth=1.5)
+        plt.axvline(x=bp_pos, color='red', linestyle='--', linewidth=1.5, alpha=0.2)
 
 
 def plot_selected_peak_ranges(
@@ -1846,9 +2090,10 @@ def analyze_brillouin_spectra_manual(
     max_workers=None,
     parallel_backend='auto',
     keep_waveforms=False,
-    baseline_spectra=False,
+    baseline_spectra=True,
     poisson_weighting=False,
     match_brilouin_parameters=True,
+    ignore_laser_peaks=False,
     laser_refit=True,
 ):
 
@@ -1868,6 +2113,8 @@ def analyze_brillouin_spectra_manual(
     baseline_spectra / poisson_weighting: forwarded to analyze_brillouin_spectrum_manual.
     match_brilouin_parameters: pass-through to per-spectrum analyzer to enforce shared Brillouin
     shifts/FWHMs when enabled.
+    ignore_laser_peaks: Can be a bool or dict. See analyze_brillouin_spectrum_manual for details.
+    When dict, supports 'brillouin_shift_average' and 'ignore_laser_for_fit' keys.
     laser_refit: when True, run a laser-only pre-pass to lock Rayleigh peak locations via
     their across-spectra median before recomputing full results.
     """
@@ -1882,13 +2129,20 @@ def analyze_brillouin_spectra_manual(
         print(f"Z-coordinate out of bounds.")
         return None
 
-    baseline_spectra = bool(baseline_spectra)
-    poisson_weighting = bool(poisson_weighting)
+    # Note: baseline_spectra and poisson_weighting are converted to bool in
+    # analyze_brillouin_spectrum_manual, so no need to convert here
     match_brilouin_parameters = bool(match_brilouin_parameters)
+    # ignore_laser_peaks can be bool or dict, pass through as-is to per-spectrum analyzer
     laser_refit = bool(laser_refit)
     ignore_brilouin_peaks = False
     total_pixels = x_dim * y_dim * len(z_list)
     print(f"Processing {total_pixels} pixels across {len(z_list)} z slices...")
+
+    # Local bindings for frequently used numpy functions (avoids attribute lookups)
+    _np_array = np.array
+    _np_arange = np.arange
+    _np_median = np.median
+    _np_nan = np.nan
 
     # global refit accumulators
     x_all, y_all, pixel_indices = [], [], []
@@ -1898,16 +2152,10 @@ def analyze_brillouin_spectra_manual(
     current_pixel_id = 0
 
     # ---------- per-pixel pass ----------
-    pixel_specs = []
-    skipped_pixels = 0
-
-    for z in z_list:
-        for x in range(x_dim):
-            for y in range(y_dim):
-                if brillouin_spectra[x, y, z] is None:
-                    skipped_pixels += 1
-                    continue
-                pixel_specs.append((x, y, z))
+    # Use list comprehension instead of nested loops with conditionals
+    pixel_specs = [(x, y, z) for z in z_list for x in range(x_dim) for y in range(y_dim)
+                   if brillouin_spectra[x, y, z] is not None]
+    skipped_pixels = total_pixels - len(pixel_specs)
 
     worker_kwargs = dict(
         free_spectral_range=free_spectral_range,
@@ -1925,23 +2173,24 @@ def analyze_brillouin_spectra_manual(
         poisson_weighting=poisson_weighting,
         match_brilouin_parameters=match_brilouin_parameters,
         ignore_brilouin_peaks=False,
+        ignore_laser_peaks=ignore_laser_peaks,
     )
 
     def _run_pixel_pass(local_kwargs, desc):
-        entries = []
         if total_pixels == 0:
-            return entries
+            return []
 
+        num_specs = len(pixel_specs)
         if max_workers is None:
             default_workers = min(32, (os.cpu_count() or 1) + 4)
-            effective_workers = min(len(pixel_specs), default_workers) if pixel_specs else 1
+            effective_workers = min(num_specs, default_workers) if num_specs else 1
         else:
             try:
                 requested_workers = int(max_workers)
             except (TypeError, ValueError):
                 requested_workers = 1
             effective_workers = max(1, requested_workers)
-            effective_workers = min(effective_workers, len(pixel_specs)) if pixel_specs else 1
+            effective_workers = min(effective_workers, num_specs) if num_specs else 1
 
         backend = (parallel_backend or 'auto').lower()
         if backend not in {'auto', 'thread', 'process'}:
@@ -1955,15 +2204,19 @@ def analyze_brillouin_spectra_manual(
 
         pbar_local = tqdm(total=total_pixels, desc=desc)
 
-        if pixel_specs:
+        if num_specs:
             if not use_parallel:
-                for coords in pixel_specs:
+                # Pre-allocate list for sequential mode (avoids repeated list resizing)
+                entries = [None] * num_specs
+                for i, coords in enumerate(pixel_specs):
                     entry = _process_pixel_common(brillouin_spectra, coords, local_kwargs)
-                    entries.append(entry)
+                    entries[i] = entry
                     x, y, z = entry['pixel_key']
                     pbar_local.set_description(f"{desc} (x={x}, y={y}, z={z})", refresh=True)
                     pbar_local.update(1)
             else:
+                # For parallel modes, collect results as they complete
+                entries = []
                 if backend == 'thread':
                     def _thread_worker(coords):
                         return _process_pixel_common(brillouin_spectra, coords, local_kwargs)
@@ -1983,12 +2236,17 @@ def analyze_brillouin_spectra_manual(
                         (coords, brillouin_spectra[coords[0], coords[1], coords[2]], local_kwargs)
                         for coords in pixel_specs
                     )
+                    # Optimize chunksize: larger chunks reduce IPC overhead for many tasks
+                    # Use ~4 chunks per worker for good load balancing
+                    optimal_chunksize = max(1, num_specs // (effective_workers * 4))
                     with ProcessPoolExecutor(max_workers=effective_workers, mp_context=ctx) as executor:
-                        for entry in executor.map(_process_pixel_with_payload, payload_iter, chunksize=1):
+                        for entry in executor.map(_process_pixel_with_payload, payload_iter, chunksize=optimal_chunksize):
                             entries.append(entry)
                             x, y, z = entry['pixel_key']
                             pbar_local.set_description(f"{desc} (x={x}, y={y}, z={z})", refresh=True)
                             pbar_local.update(1)
+        else:
+            entries = []
 
         if skipped_pixels:
             pbar_local.update(skipped_pixels)
@@ -2020,7 +2278,7 @@ def analyze_brillouin_spectra_manual(
                 per_peak_values[idx].append(int(val))
 
         if per_peak_values and all(len(vals) for vals in per_peak_values):
-            median_indices = [int(round(float(np.median(vals)))) for vals in per_peak_values]
+            median_indices = [int(round(float(_np_median(vals)))) for vals in per_peak_values]
 
         worker_kwargs_second = dict(worker_kwargs)
         worker_kwargs_second['ignore_brilouin_peaks'] = False
@@ -2040,7 +2298,7 @@ def analyze_brillouin_spectra_manual(
         pixel_key = entry['pixel_key']
         result = entry['result']
         if result is None:
-            peaks_map_global[pixel_key] = np.nan
+            peaks_map_global[pixel_key] = _np_nan
             continue
 
         peaks_map_global[pixel_key] = result
@@ -2052,7 +2310,7 @@ def analyze_brillouin_spectra_manual(
         best_a_list.append(a0); best_b_list.append(b0); best_c_list[pixel_key] = c0
         lidx = result['laser_peaks_indices']
         if len(lidx) >= 3:
-            y_expected = np.arange(len(lidx)) * free_spectral_range
+            y_expected = _np_arange(len(lidx)) * free_spectral_range
             x_all.extend(lidx)
             y_all.extend(y_expected)
             pixel_indices.extend([pixel_id_map[pixel_key]] * len(lidx))
@@ -2060,7 +2318,7 @@ def analyze_brillouin_spectra_manual(
     # ---------- optional global refit (kept to match your API) ----------
     if refit and (not laser_refit) and current_pixel_id > 0:
         print("Performing global refit across all slices...")
-        x_all = np.array(x_all); y_all = np.array(y_all); pixel_indices = np.array(pixel_indices)
+        x_all = _np_array(x_all); y_all = _np_array(y_all); pixel_indices = _np_array(pixel_indices)
         N_pixels = current_pixel_id
         x_all_squared = x_all ** 2
 
@@ -2068,9 +2326,9 @@ def analyze_brillouin_spectra_manual(
             a, b, c = params
             return y - (a * x2 + b * x + c)
 
-        a_init = np.median(best_a_list) if best_a_list else 1e-16
-        b_init = np.median(best_b_list) if best_b_list else 1e-16
-        c_init = np.median(list(best_c_list.values())) if best_c_list else 0.0
+        a_init = _np_median(best_a_list) if best_a_list else 1e-16
+        b_init = _np_median(best_b_list) if best_b_list else 1e-16
+        c_init = _np_median(list(best_c_list.values())) if best_c_list else 0.0
 
         result = least_squares(global_residuals, x0=[a_init, b_init, c_init],
                                bounds=([1e-16, 1e-16, -np.inf], [np.inf, np.inf, np.inf]),
@@ -2110,7 +2368,7 @@ def analyze_brillouin_spectra_manual(
 
                 spectrum = np.asarray(fitted['spectrum'], dtype=float)
                 N = len(spectrum)
-                x_axis = np.arange(N)
+                x_axis = _np_arange(N)
                 rescaled_x_axis_new = a_global * x_axis**2 + b_global * x_axis + c_global
 
                 # stash for consumers/plots
